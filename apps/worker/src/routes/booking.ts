@@ -387,6 +387,16 @@ booking.get('/api/liff/booking/menus/:id/staff', async (c) => {
          INNER JOIN staff_menus sm ON sm.staff_id = s.id AND sm.menu_id = ?2 AND sm.is_offered = 1
          INNER JOIN menus m ON m.id = ?2
         WHERE s.line_account_id = ?1 AND s.is_active = 1 AND s.deleted_at IS NULL
+          AND (
+            m.auto_confirm = 0
+            OR EXISTS (
+              SELECT 1
+                FROM google_calendar_connections gcc
+               WHERE gcc.staff_id = s.id
+                 AND gcc.line_account_id = ?1
+                 AND gcc.is_active = 1
+            )
+          )
         ORDER BY s.is_designation_optional DESC, s.sort_order ASC, s.id ASC`,
     )
     .bind(accountId, menuId)

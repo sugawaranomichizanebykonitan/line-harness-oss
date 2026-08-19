@@ -10,8 +10,8 @@ import { createApi, type MenuItem, type StaffItem } from '../lib/api.js';
 type Step = 'menu' | 'staff' | 'datetime' | 'confirm' | 'done';
 
 const STEPS: Array<{ key: Step; label: string }> = [
-  { key: 'menu', label: 'メニュー' },
-  { key: 'staff', label: '担当' },
+  { key: 'menu', label: '相談内容' },
+  { key: 'staff', label: '担当者' },
   { key: 'datetime', label: '日時' },
   { key: 'confirm', label: '確認' },
 ];
@@ -47,14 +47,10 @@ export default function Booking({
         const hit = res.menus.find((m) => m.id === initialMenuId);
         if (hit) {
           setMenu(hit);
-          const staffResult = await createApi(ctx).staffOf(hit.id);
-          if (cancelled) return;
-          if (staffResult.staff.length === 1) {
-            setStaff(staffResult.staff[0]);
-            setStep('datetime');
-          } else {
-            setStep('staff');
-          }
+          // 専用リンクから開いた場合も、担当者は利用者自身に選んでもらう。
+          // 1名だけの時点でも選択画面を省略しないことで、将来スタッフが
+          // 増えた場合と同じ導線を保ち、誰の予定に入るかを明確にする。
+          setStep('staff');
         }
       })
       .catch(() => {
@@ -180,7 +176,7 @@ export default function Booking({
           ctaLabel={
             peekMode
               ? '空き状況の確認モードです（タップで予約に進めます）'
-              : 'step 3 / 4'
+              : '空いている日時だけを表示しています'
           }
           selected={slot}
           onSelect={(picked) => {

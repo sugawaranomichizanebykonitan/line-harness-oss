@@ -28,14 +28,9 @@ export default function Booking() {
       const directMenu = menus.find((item) => item.id === directMenuId);
       if (!directMenu || cancelled) return;
       setMenu(directMenu);
-      const { staff: availableStaff } = await api.staffOf(directMenu.id);
-      if (cancelled) return;
-      if (availableStaff.length === 1) {
-        setStaff(availableStaff[0]);
-        setStep('datetime');
-      } else {
-        setStep('staff');
-      }
+      // 専用リンクでも担当者を明示的に選択してもらう。
+      // 予約先のカレンダーが誰のものか分かる導線を優先する。
+      setStep('staff');
     }).catch(() => {
       // 専用URLが古い場合は通常のメニュー一覧を表示する。
     });

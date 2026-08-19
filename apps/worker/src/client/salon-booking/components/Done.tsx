@@ -24,11 +24,11 @@ export default function Done({ confirmed = false }: { confirmed?: boolean }) {
         >
           ✓
         </div>
-        <h1 className="text-lg font-bold text-gray-900 mt-4">{confirmed ? '予約が完了しました' : 'リクエストを送信しました'}</h1>
+        <h1 className="text-lg font-bold text-gray-900 mt-4">{confirmed ? '無料個別相談の予約が完了しました' : 'リクエストを送信しました'}</h1>
         <p className="text-sm text-gray-600 mt-3 leading-relaxed">
           {confirmed ? <>
-            Googleカレンダーに予定を登録しました。<br />
-            前日と開始1時間前にLINEでGoogle Meet情報をお送りします。
+            担当者のGoogleカレンダーに予定とMeetを登録しました。<br />
+            参加URLはLINEでお送りし、前日と開始1時間前にもお知らせします。
           </> : <>
             担当者からの返信をお待ちください。<br />
             確定するとLINEに通知が届きます。

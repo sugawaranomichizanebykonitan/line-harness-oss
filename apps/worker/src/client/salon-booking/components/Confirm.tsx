@@ -68,7 +68,7 @@ export default function Confirm({
           <Row label="所要" value={`${staff.duration_minutes} 分`} />
           <Row
             label="料金"
-            value={`¥${staff.price.toLocaleString()}`}
+            value={staff.price === 0 ? '無料' : `¥${staff.price.toLocaleString()}`}
             valueClassName="font-bold text-base sb-line-green-text"
           />
         </dl>
@@ -94,10 +94,10 @@ export default function Confirm({
         className="w-full text-white py-3.5 rounded-xl font-bold disabled:opacity-50"
         style={{ background: '#06C755', boxShadow: '0 1px 3px rgba(6, 199, 85, 0.3)' }}
       >
-        {submitting ? '予約中…' : menu.auto_confirm ? 'この日時で予約を確定' : '予約をリクエスト'}
+        {submitting ? '予約を確定しています…' : menu.auto_confirm ? 'この内容で無料相談を予約する' : '予約をリクエスト'}
       </button>
       <p className="text-xs text-gray-400 text-center">
-        {menu.auto_confirm ? '予約後、Google Meet情報をLINEでご案内します' : '確定すると LINE に通知が届きます'}
+        {menu.auto_confirm ? '予約完了後、Google Meetの参加URLをLINEでご案内します' : '確定すると LINE に通知が届きます'}
       </p>
     </div>
   );
