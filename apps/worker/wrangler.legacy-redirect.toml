@@ -1,0 +1,5 @@
+name = "line-harness"
+main = "src/legacy-url-redirect.ts"
+compatibility_date = "2024-12-01"
+workers_dev = true
+account_id = "9347b348f3527ba2f9c7e3ce99681f5a"

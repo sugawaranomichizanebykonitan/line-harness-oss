@@ -1,4 +1,4 @@
-name = "line-harness"
+name = "frei-career"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
@@ -40,14 +40,14 @@ crons = ["* * * * *", "0 */6 * * *"]
 # 不活性になる (本番挙動を変えないための判断, 2026-07-07)。
 # ═══════════════════════════════════════════════════════════════
 [vars]
-WORKER_NAME = "line-harness"
-ADMIN_PAGES_PROJECT = "line-harness-admin"
-LIFF_PAGES_PROJECT = "line-harness-liff"
+WORKER_NAME = "frei-career"
+ADMIN_PAGES_PROJECT = "frei-career-admin"
+LIFF_PAGES_PROJECT = "frei-career-liff"
 D1_DATABASE_ID = "YOUR_DEV_D1_DATABASE_ID"
 MANIFEST_URL = "https://github.com/Shudesu/line-harness-oss/releases/latest/download/release-manifest.json"
-WORKER_PUBLIC_URL = "https://line-harness.workers.dev"
-ADMIN_PUBLIC_URL = "https://line-harness-admin.pages.dev"
-LIFF_PUBLIC_URL = "https://line-harness-liff.pages.dev"
+WORKER_PUBLIC_URL = "https://frei-career.workers.dev"
+ADMIN_PUBLIC_URL = "https://frei-career-admin.pages.dev"
+LIFF_PUBLIC_URL = "https://frei-career-liff.pages.dev"
 CF_ACCOUNT_ID = "YOUR_DEV_ACCOUNT_ID"
 
 # ═══════════════════════════════════════════════════════════════
