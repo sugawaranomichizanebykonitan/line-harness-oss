@@ -316,7 +316,18 @@ async function syncConfirmedBookingIntegrations(
         body: JSON.stringify(consultation),
       });
       if (!response.ok) {
-        throw new Error(`meet_consultation_registration_failed:${response.status}`);
+        const responseBody = await response.text().catch(() => '');
+        console.warn(
+          'Meet consultation API registration failed; retrying with the local service',
+          response.status,
+          responseBody.slice(0, 500),
+        );
+        // Cloudflare can reject a Worker subrequest back to its own workers.dev
+        // origin with error 1042. Keep the documented POST as the primary
+        // integration, then complete the exact same idempotent registration
+        // against this invocation's D1 binding instead of cancelling an
+        // otherwise valid Google Calendar / Meet booking.
+        await registerMeetConsultation(db, consultation);
       }
     } else {
       // Local tests and installations without a public Worker URL use the same
@@ -347,8 +358,14 @@ async function cancelBookingMeetIntegration(
         method: 'DELETE',
         headers: { Authorization: `Bearer ${env.API_KEY}` },
       });
-      if (!response.ok && response.status !== 404) {
-        throw new Error(`meet_consultation_cancellation_failed:${response.status}`);
+      if (!response.ok) {
+        const responseBody = await response.text().catch(() => '');
+        console.warn(
+          'Meet consultation API cancellation failed; retrying with the local service',
+          response.status,
+          responseBody.slice(0, 500),
+        );
+        await cancelMeetConsultation(db, bookingRow.external_event_id);
       }
     } else {
       await cancelMeetConsultation(db, bookingRow.external_event_id);
