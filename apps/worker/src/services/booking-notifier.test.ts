@@ -20,7 +20,15 @@ describe('renderNotificationText', () => {
   test('承認', () => {
     const text = renderNotificationText('approved', ctx);
     expect(text).toContain('予約が確定しました');
-    expect(text).toContain('変更・キャンセルはお店に直接ご連絡ください');
+    expect(text).toContain('変更・キャンセルはLINEでご連絡ください');
+  });
+  test('承認時にGoogle Meet URLを案内できる', () => {
+    const text = renderNotificationText('approved', {
+      ...ctx,
+      meetUrl: 'https://meet.google.com/abc-defg-hij',
+    });
+    expect(text).toContain('Google Meet');
+    expect(text).toContain('https://meet.google.com/abc-defg-hij');
   });
   test('拒否', () => {
     expect(renderNotificationText('rejected', ctx)).toContain('お取りできませんでした');

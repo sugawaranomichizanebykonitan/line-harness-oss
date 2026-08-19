@@ -1653,6 +1653,7 @@ export interface BookingMenu {
   description: string | null;
   duration_minutes: number;
   buffer_after_minutes: number;
+  auto_confirm: number;
   base_price: number;
   sort_order: number;
   is_active: number;
@@ -1739,6 +1740,14 @@ export const bookingApi = {
   deleteMenu: (accountId: string, id: string) =>
     fetchApi<{ ok: true }>(withAccount(`/api/booking/admin/menus/${id}`, accountId), {
       method: 'DELETE',
+    }),
+  createCareerConsultingPreset: (accountId: string) =>
+    fetchApi<{
+      menu_id: string;
+      staff_id: string;
+      created: boolean;
+    }>(withAccount('/api/booking/admin/presets/career-consulting', accountId), {
+      method: 'POST',
     }),
   // Staff
   listStaff: (accountId: string) =>

@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import MenuList from '../components/MenuList.js';
 import StaffList from '../components/StaffList.js';
 import DateTimePicker from '../components/DateTimePicker.js';
 import Confirm from '../components/Confirm.js';
 import Done from '../components/Done.js';
-import type { MenuItem, StaffItem } from '../lib/api.js';
+import { api, type MenuItem, type StaffItem } from '../lib/api.js';
 
 type Step = 'menu' | 'staff' | 'datetime' | 'confirm' | 'done';
 
@@ -13,11 +13,34 @@ export default function Booking() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const isPeek = params.get('mode') === 'peek';
+  const directMenuId = params.get('menu_id');
 
   const [step, setStep] = useState<Step>('menu');
   const [menu, setMenu] = useState<MenuItem | null>(null);
   const [staff, setStaff] = useState<StaffItem | null>(null);
   const [slot, setSlot] = useState<{ date: string; start: string } | null>(null);
+  const [bookingStatus, setBookingStatus] = useState<string>('requested');
+
+  useEffect(() => {
+    if (!directMenuId) return;
+    let cancelled = false;
+    void api.menus().then(async ({ menus }) => {
+      const directMenu = menus.find((item) => item.id === directMenuId);
+      if (!directMenu || cancelled) return;
+      setMenu(directMenu);
+      const { staff: availableStaff } = await api.staffOf(directMenu.id);
+      if (cancelled) return;
+      if (availableStaff.length === 1) {
+        setStaff(availableStaff[0]);
+        setStep('datetime');
+      } else {
+        setStep('staff');
+      }
+    }).catch(() => {
+      // 専用URLが古い場合は通常のメニュー一覧を表示する。
+    });
+    return () => { cancelled = true; };
+  }, [directMenuId]);
 
   function exitPeekToBooking() {
     // peek モードを抜けて通常フローへ。同じ menu/staff/slot を持ち回したまま step を進める。
@@ -85,11 +108,14 @@ export default function Booking() {
           menu={menu}
           staff={staff}
           slot={slot}
-          onSubmitted={() => setStep('done')}
+          onSubmitted={(status) => {
+            setBookingStatus(status);
+            setStep('done');
+          }}
           onBack={() => setStep('datetime')}
         />
       )}
-      {step === 'done' && <Done />}
+      {step === 'done' && <Done confirmed={bookingStatus === 'confirmed'} />}
     </div>
   );
 }

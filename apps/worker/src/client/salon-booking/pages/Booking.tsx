@@ -30,6 +30,7 @@ export default function Booking({
   const [menu, setMenu] = useState<MenuItem | null>(null);
   const [staff, setStaff] = useState<StaffItem | null>(null);
   const [slot, setSlot] = useState<{ date: string; start: string } | null>(null);
+  const [bookingStatus, setBookingStatus] = useState('requested');
   // ?menu_id=... が指定されたら、メニュー一覧をスキップして staff から開始。
   // 該当 menu が無効/未公開だった場合は通常フローに fallback（黙って全
   // メニュー一覧を出す方が「初回オリエン直リンク経由なのに別メニュー
@@ -41,12 +42,19 @@ export default function Booking({
     let cancelled = false;
     createApi(ctx)
       .menus()
-      .then((res) => {
+      .then(async (res) => {
         if (cancelled) return;
         const hit = res.menus.find((m) => m.id === initialMenuId);
         if (hit) {
           setMenu(hit);
-          setStep('staff');
+          const staffResult = await createApi(ctx).staffOf(hit.id);
+          if (cancelled) return;
+          if (staffResult.staff.length === 1) {
+            setStaff(staffResult.staff[0]);
+            setStep('datetime');
+          } else {
+            setStep('staff');
+          }
         }
       })
       .catch(() => {
@@ -206,11 +214,14 @@ export default function Booking({
           menu={menu}
           staff={staff}
           slot={slot}
-          onSubmitted={() => setStep('done')}
+          onSubmitted={(status) => {
+            setBookingStatus(status);
+            setStep('done');
+          }}
           onBack={() => setStep('datetime')}
         />
       )}
-      {step === 'done' && <Done />}
+      {step === 'done' && <Done confirmed={bookingStatus === 'confirmed'} />}
     </div>
   );
 }

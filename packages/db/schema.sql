@@ -943,6 +943,7 @@ CREATE TABLE IF NOT EXISTS menus (
   description           TEXT,
   duration_minutes      INTEGER NOT NULL,
   buffer_after_minutes  INTEGER NOT NULL DEFAULT 0,
+  auto_confirm          INTEGER NOT NULL DEFAULT 0,
   base_price            INTEGER NOT NULL,
   sort_order            INTEGER NOT NULL DEFAULT 0,
   is_active             INTEGER NOT NULL DEFAULT 1,

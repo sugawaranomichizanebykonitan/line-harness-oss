@@ -1,6 +1,6 @@
 import { useSalonContext } from '../lib/context.js';
 
-export default function Done() {
+export default function Done({ confirmed = false }: { confirmed?: boolean }) {
   const ctx = useSalonContext();
   function gotoHistory() {
     const url = new URL(window.location.href);
@@ -24,11 +24,15 @@ export default function Done() {
         >
           ✓
         </div>
-        <h1 className="text-lg font-bold text-gray-900 mt-4">リクエストを送信しました</h1>
+        <h1 className="text-lg font-bold text-gray-900 mt-4">{confirmed ? '予約が完了しました' : 'リクエストを送信しました'}</h1>
         <p className="text-sm text-gray-600 mt-3 leading-relaxed">
-          お店からの返信をお待ちください。
-          <br />
-          確定すると LINE に通知が届きます。
+          {confirmed ? <>
+            Googleカレンダーに予定を登録しました。<br />
+            前日と開始1時間前にLINEでGoogle Meet情報をお送りします。
+          </> : <>
+            担当者からの返信をお待ちください。<br />
+            確定するとLINEに通知が届きます。
+          </>}
         </p>
         <div className="grid grid-cols-2 gap-2 mt-6">
           <button

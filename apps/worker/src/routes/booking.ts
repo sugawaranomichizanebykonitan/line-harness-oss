@@ -34,6 +34,10 @@ import {
   type BookingStatus,
 } from '../services/booking-types.js';
 import { awardActivityMileage } from '../services/activity-mileage.js';
+import {
+  cancelMeetConsultation,
+  registerMeetConsultation,
+} from '../services/meet-consultation-reminders.js';
 import { GoogleCalendarClient } from '../services/google-calendar.js';
 import {
   buildGoogleOAuthAuthorizationUrl,
@@ -227,12 +231,14 @@ async function notifyForBooking(
               m.name AS menu_name,
               s.display_name AS staff_name,
               la.channel_access_token,
-              f.line_user_id
+              f.line_user_id,
+              mc.meet_url
          FROM bookings b
          INNER JOIN menus m ON m.id = b.menu_id
          INNER JOIN staff s ON s.id = b.staff_id
          INNER JOIN line_accounts la ON la.id = b.line_account_id
          INNER JOIN friends f ON f.id = b.friend_id
+         LEFT JOIN meet_consultations mc ON mc.external_event_id = b.external_event_id
         WHERE b.id = ?`,
     )
     .bind(bookingId)
@@ -242,6 +248,7 @@ async function notifyForBooking(
       staff_name: string;
       channel_access_token: string;
       line_user_id: string;
+      meet_url: string | null;
     }>();
   if (!row) return;
   await sendBookingNotification({
@@ -253,8 +260,96 @@ async function notifyForBooking(
       staffName: row.staff_name,
       startsAtJst: startsAtJst(row.starts_at),
       hoursBefore: 0,
+      meetUrl: row.meet_url,
     },
   });
+}
+
+async function syncConfirmedBookingIntegrations(
+  db: D1Database,
+  env: Env['Bindings'],
+  bookingId: string,
+): Promise<{ synced: boolean; meetUrl?: string }> {
+  const details = await db
+    .prepare(
+      `SELECT b.friend_id, b.starts_at, b.ends_at, m.name AS menu_name,
+              m.auto_confirm
+         FROM bookings b
+         INNER JOIN menus m ON m.id = b.menu_id
+        WHERE b.id = ? AND b.status = 'confirmed'`,
+    )
+    .bind(bookingId)
+    .first<{
+      friend_id: string;
+      starts_at: string;
+      ends_at: string;
+      menu_name: string;
+      auto_confirm: number;
+    }>();
+  if (!details) return { synced: false };
+
+  const synced = await syncConfirmedBookingToGoogle(
+    db,
+    googleCredentials(env),
+    bookingId,
+    { addGoogleMeet: details.auto_confirm === 1 },
+  );
+  if (details.auto_confirm === 1 && synced.eventId && synced.meetUrl) {
+    const consultation = {
+      externalEventId: synced.eventId,
+      friendId: details.friend_id,
+      title: details.menu_name,
+      startsAt: details.starts_at,
+      endsAt: details.ends_at,
+      meetUrl: synced.meetUrl,
+    };
+    if (env.WORKER_URL && env.API_KEY) {
+      const response = await fetch(new URL('/api/meet-consultations', env.WORKER_URL), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(consultation),
+      });
+      if (!response.ok) {
+        throw new Error(`meet_consultation_registration_failed:${response.status}`);
+      }
+    } else {
+      // Local tests and installations without a public Worker URL use the same
+      // service directly. Production calls the documented API above.
+      await registerMeetConsultation(db, consultation);
+    }
+  }
+  return { synced: synced.synced, meetUrl: synced.meetUrl };
+}
+
+async function cancelBookingMeetIntegration(
+  db: D1Database,
+  env: Env['Bindings'],
+  bookingId: string,
+): Promise<void> {
+  const bookingRow = await db
+    .prepare('SELECT external_event_id FROM bookings WHERE id = ?')
+    .bind(bookingId)
+    .first<{ external_event_id: string | null }>();
+  if (bookingRow?.external_event_id) {
+    if (env.WORKER_URL && env.API_KEY) {
+      const endpoint = new URL(
+        `/api/meet-consultations/${encodeURIComponent(bookingRow.external_event_id)}`,
+        env.WORKER_URL,
+      );
+      const response = await fetch(endpoint, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${env.API_KEY}` },
+      });
+      if (!response.ok && response.status !== 404) {
+        throw new Error(`meet_consultation_cancellation_failed:${response.status}`);
+      }
+    } else {
+      await cancelMeetConsultation(db, bookingRow.external_event_id);
+    }
+  }
 }
 
 // ================================================================
@@ -267,7 +362,7 @@ booking.get('/api/liff/booking/menus', async (c) => {
   const rows = await c.env.DB
     .prepare(
       `SELECT id, name, category_label, description,
-              duration_minutes, buffer_after_minutes,
+              duration_minutes, buffer_after_minutes, auto_confirm,
               base_price, sort_order
          FROM menus
         WHERE line_account_id = ? AND is_active = 1 AND deleted_at IS NULL
@@ -374,6 +469,7 @@ booking.post('/api/liff/booking/requests', async (c) => {
   const menuRow = await c.env.DB
     .prepare(
       `SELECT m.id, m.duration_minutes, m.buffer_after_minutes, m.base_price,
+              m.auto_confirm,
               m.auto_tag_id,
               COALESCE(sm.override_duration_minutes, m.duration_minutes) AS dur,
               COALESCE(sm.override_price, m.base_price) AS price,
@@ -384,7 +480,7 @@ booking.post('/api/liff/booking/requests', async (c) => {
           AND m.deleted_at IS NULL AND m.is_active = 1`,
     )
     .bind(body.menu_id, body.staff_id, accountId)
-    .first<{ duration_minutes: number; buffer_after_minutes: number; auto_tag_id: string | null; dur: number; price: number; is_offered: number | null }>();
+    .first<{ duration_minutes: number; buffer_after_minutes: number; auto_confirm: number; auto_tag_id: string | null; dur: number; price: number; is_offered: number | null }>();
   if (!menuRow || menuRow.is_offered !== 1) {
     return c.json({ error: 'menu_not_offered' }, 422);
   }
@@ -417,6 +513,12 @@ booking.post('/api/liff/booking/requests', async (c) => {
     (slot) => slot.date === startJstDate && slot.start === startJstHHMM,
   );
   if (!slotMatched) return c.json({ error: 'slot_not_available' }, 422);
+  const calendarState = latestAvailability.calendar_sync?.find(
+    (state) => state.staff_id === body.staff_id,
+  );
+  if (menuRow.auto_confirm === 1 && !calendarState?.configured) {
+    return c.json({ error: 'google_calendar_not_configured' }, 503);
+  }
 
   const bookingId = crypto.randomUUID();
   const nowIso = new Date().toISOString();
@@ -428,8 +530,8 @@ booking.post('/api/liff/booking/requests', async (c) => {
       `INSERT INTO bookings
         (id, line_account_id, friend_id, staff_id, menu_id,
          starts_at, ends_at, block_ends_at, status,
-         customer_note, price_at_booking, requested_at)
-       SELECT ?,?,?,?,?,?,?,?,?,?,?,?
+         customer_note, price_at_booking, requested_at, decided_at)
+       SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?
         WHERE NOT EXISTS (
           SELECT 1 FROM bookings
            WHERE staff_id = ?
@@ -447,10 +549,11 @@ booking.post('/api/liff/booking/requests', async (c) => {
       startsAt.toISOString(),
       endsAt.toISOString(),
       blockEndsAt.toISOString(),
-      'requested' satisfies BookingStatus,
+      (menuRow.auto_confirm === 1 ? 'confirmed' : 'requested') satisfies BookingStatus,
       body.customer_note ?? null,
       menuRow.price,
       nowIso,
+      menuRow.auto_confirm === 1 ? nowIso : null,
       // NOT EXISTS subquery params
       body.staff_id,
       blockEndsAt.toISOString(),
@@ -471,6 +574,26 @@ booking.post('/api/liff/booking/requests', async (c) => {
     return c.json(err, 409);
   }
 
+  if (menuRow.auto_confirm === 1) {
+    try {
+      const integration = await syncConfirmedBookingIntegrations(c.env.DB, c.env, bookingId);
+      if (!integration.synced || !integration.meetUrl) throw new Error('meet_not_created');
+    } catch (error) {
+      console.error('Career consultation calendar/Meet sync failed:', error);
+      await cancelBookingMeetIntegration(c.env.DB, c.env, bookingId).catch(() => undefined);
+      await removeBookingFromGoogle(
+        c.env.DB,
+        googleCredentials(c.env),
+        bookingId,
+      ).catch(() => undefined);
+      await c.env.DB
+        .prepare("UPDATE bookings SET status='cancelled', updated_at=? WHERE id=?")
+        .bind(new Date().toISOString(), bookingId)
+        .run();
+      return c.json({ error: 'calendar_sync_failed' }, 503);
+    }
+  }
+
   c.executionCtx.waitUntil(
     awardActivityMileage(c.env.DB, {
       eventType: 'booking_created',
@@ -484,8 +607,8 @@ booking.post('/api/liff/booking/requests', async (c) => {
 
   // Fire-and-forget notification — failures must not roll back the booking.
   c.executionCtx.waitUntil(
-    notifyForBooking(c.env.DB, bookingId, 'requested').catch((err) =>
-      console.error('booking notify (requested) failed:', err),
+    notifyForBooking(c.env.DB, bookingId, menuRow.auto_confirm === 1 ? 'approved' : 'requested').catch((err) =>
+      console.error('booking notify failed:', err),
     ),
   );
 
@@ -505,7 +628,10 @@ booking.post('/api/liff/booking/requests', async (c) => {
     );
   }
 
-  const responseBody = { booking_id: bookingId, status: 'requested' };
+  const responseBody = {
+    booking_id: bookingId,
+    status: menuRow.auto_confirm === 1 ? 'confirmed' : 'requested',
+  };
   await saveIdempotencyResponse(c.env.DB, {
     key: idemKey,
     lineAccountId: accountId,
@@ -570,13 +696,109 @@ booking.get('/api/liff/booking/me', async (c) => {
 
 // ---- Menus CRUD ----
 
+booking.post('/api/booking/admin/presets/career-consulting', async (c) => {
+  const accountId = await resolveAccountIdAdmin(c);
+  if (!accountId) return c.json({ error: 'missing_account_id' }, 400);
+
+  const presetName = '【無料】キャリアコンサルティング';
+  let menu = await c.env.DB
+    .prepare(
+      `SELECT id FROM menus
+        WHERE line_account_id = ? AND name = ? AND deleted_at IS NULL
+        LIMIT 1`,
+    )
+    .bind(accountId, presetName)
+    .first<{ id: string }>();
+  const created = !menu;
+  if (!menu) {
+    menu = { id: crypto.randomUUID() };
+    await c.env.DB
+      .prepare(
+        `INSERT INTO menus
+          (id, line_account_id, name, category_label, description,
+           duration_minutes, buffer_after_minutes, auto_confirm,
+           base_price, sort_order, is_active)
+         VALUES (?, ?, ?, 'キャリア相談', ?, 60, 30, 1, 0, -100, 1)`,
+      )
+      .bind(
+        menu.id,
+        accountId,
+        presetName,
+        'Google Meetで行う無料キャリアコンサルティングです。日時を選ぶとその場で予約が確定します。',
+      )
+      .run();
+  } else {
+    await c.env.DB
+      .prepare(
+        `UPDATE menus
+            SET buffer_after_minutes=30, auto_confirm=1, base_price=0,
+                is_active=1, updated_at=?
+          WHERE id=? AND line_account_id=?`,
+      )
+      .bind(new Date().toISOString(), menu.id, accountId)
+      .run();
+  }
+
+  let staff = await c.env.DB
+    .prepare(
+      `SELECT id FROM staff
+        WHERE line_account_id = ? AND deleted_at IS NULL AND is_active = 1
+        ORDER BY sort_order ASC LIMIT 1`,
+    )
+    .bind(accountId)
+    .first<{ id: string }>();
+  if (!staff) {
+    staff = { id: crypto.randomUUID() };
+    await c.env.DB
+      .prepare(
+        `INSERT INTO staff
+          (id, line_account_id, name, display_name, role,
+           sort_order, is_designation_optional, is_active)
+         VALUES (?, ?, 'career-consultant', 'キャリアコンサルタント',
+                 'キャリアコンサルティング', 0, 1, 1)`,
+      )
+      .bind(staff.id, accountId)
+      .run();
+  }
+
+  await c.env.DB
+    .prepare(
+      `INSERT INTO staff_menus
+        (staff_id, menu_id, is_offered, override_duration_minutes, override_price)
+       VALUES (?, ?, 1, NULL, 0)
+       ON CONFLICT(staff_id, menu_id) DO UPDATE SET is_offered=1, override_price=0`,
+    )
+    .bind(staff.id, menu.id)
+    .run();
+
+  const existingRules = await c.env.DB
+    .prepare('SELECT COUNT(*) AS count FROM staff_availability_rules WHERE staff_id = ?')
+    .bind(staff.id)
+    .first<{ count: number }>();
+  if ((existingRules?.count ?? 0) === 0) {
+    await c.env.DB.batch(
+      Array.from({ length: 7 }, (_, weekday) =>
+        c.env.DB
+          .prepare(
+            `INSERT INTO staff_availability_rules
+              (id, staff_id, weekday, start_time, end_time, is_active)
+             VALUES (?, ?, ?, '08:00', '21:00', 1)`,
+          )
+          .bind(crypto.randomUUID(), staff!.id, weekday),
+      ),
+    );
+  }
+
+  return c.json({ menu_id: menu.id, staff_id: staff.id, created }, created ? 201 : 200);
+});
+
 booking.get('/api/booking/admin/menus', async (c) => {
   const accountId = await resolveAccountIdAdmin(c);
   if (!accountId) return c.json({ error: 'missing_account_id' }, 400);
   const rows = await c.env.DB
     .prepare(
       `SELECT id, name, category_label, description,
-              duration_minutes, buffer_after_minutes,
+              duration_minutes, buffer_after_minutes, auto_confirm,
               base_price, sort_order, is_active, auto_tag_id
          FROM menus
         WHERE line_account_id = ? AND deleted_at IS NULL
@@ -596,6 +818,7 @@ booking.post('/api/booking/admin/menus', async (c) => {
     description?: string | null;
     duration_minutes: number;
     buffer_after_minutes?: number;
+    auto_confirm?: boolean;
     base_price: number;
     sort_order?: number;
     auto_tag_id?: string | null;
@@ -613,8 +836,8 @@ booking.post('/api/booking/admin/menus', async (c) => {
     .prepare(
       `INSERT INTO menus
         (id, line_account_id, name, category_label, description,
-         duration_minutes, buffer_after_minutes, base_price, sort_order, auto_tag_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+         duration_minutes, buffer_after_minutes, auto_confirm, base_price, sort_order, auto_tag_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .bind(
       id,
@@ -624,6 +847,7 @@ booking.post('/api/booking/admin/menus', async (c) => {
       b.description ?? null,
       b.duration_minutes,
       b.buffer_after_minutes ?? 0,
+      b.auto_confirm ? 1 : 0,
       b.base_price,
       b.sort_order ?? 0,
       autoTagId,
@@ -642,6 +866,7 @@ booking.put('/api/booking/admin/menus/:id', async (c) => {
     description?: string | null;
     duration_minutes: number;
     buffer_after_minutes?: number;
+    auto_confirm?: boolean;
     base_price: number;
     sort_order?: number;
     is_active?: boolean;
@@ -651,6 +876,9 @@ booking.put('/api/booking/admin/menus/:id', async (c) => {
   // null として書き込むと既存設定を消してしまうため、key 存在チェックで「明示的に送られた
   // ときだけ」更新する。
   const hasAutoTagId = Object.prototype.hasOwnProperty.call(b, 'auto_tag_id');
+  const autoConfirm = Object.prototype.hasOwnProperty.call(b, 'auto_confirm')
+    ? (b.auto_confirm ? 1 : 0)
+    : null;
   const autoTagId = hasAutoTagId
     ? ((b.auto_tag_id ?? '').trim() === '' ? null : (b.auto_tag_id as string))
     : null;
@@ -666,7 +894,7 @@ booking.put('/api/booking/admin/menus/:id', async (c) => {
       .prepare(
         `UPDATE menus
             SET name = ?, category_label = ?, description = ?,
-                duration_minutes = ?, buffer_after_minutes = ?,
+                duration_minutes = ?, buffer_after_minutes = ?, auto_confirm = COALESCE(?, auto_confirm),
                 base_price = ?, sort_order = ?, is_active = ?, auto_tag_id = ?,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
           WHERE id = ? AND line_account_id = ?`,
@@ -677,6 +905,7 @@ booking.put('/api/booking/admin/menus/:id', async (c) => {
         b.description ?? null,
         b.duration_minutes,
         b.buffer_after_minutes ?? 0,
+        autoConfirm,
         b.base_price,
         b.sort_order ?? 0,
         b.is_active === false ? 0 : 1,
@@ -690,7 +919,7 @@ booking.put('/api/booking/admin/menus/:id', async (c) => {
       .prepare(
         `UPDATE menus
             SET name = ?, category_label = ?, description = ?,
-                duration_minutes = ?, buffer_after_minutes = ?,
+                duration_minutes = ?, buffer_after_minutes = ?, auto_confirm = COALESCE(?, auto_confirm),
                 base_price = ?, sort_order = ?, is_active = ?,
                 updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')
           WHERE id = ? AND line_account_id = ?`,
@@ -701,6 +930,7 @@ booking.put('/api/booking/admin/menus/:id', async (c) => {
         b.description ?? null,
         b.duration_minutes,
         b.buffer_after_minutes ?? 0,
+        autoConfirm,
         b.base_price,
         b.sort_order ?? 0,
         b.is_active === false ? 0 : 1,
@@ -907,11 +1137,7 @@ booking.post('/api/booking/admin/bookings', async (c) => {
   });
   let calendarSync: 'not_configured' | 'synced' | 'failed' = 'not_configured';
   try {
-    const synced = await syncConfirmedBookingToGoogle(
-      c.env.DB,
-      googleCredentials(c.env),
-      bookingId,
-    );
+    const synced = await syncConfirmedBookingIntegrations(c.env.DB, c.env, bookingId);
     calendarSync = synced.synced ? 'synced' : 'not_configured';
   } catch (error) {
     calendarSync = 'failed';
@@ -1585,7 +1811,7 @@ booking.patch('/api/booking/admin/requests/:id', async (c) => {
       now: new Date(),
     });
     try {
-      await syncConfirmedBookingToGoogle(c.env.DB, googleCredentials(c.env), id);
+      await syncConfirmedBookingIntegrations(c.env.DB, c.env, id);
     } catch (error) {
       console.error('Google Calendar sync (approve) failed:', error);
     }
@@ -1607,11 +1833,10 @@ booking.patch('/api/booking/admin/requests/:id', async (c) => {
       )
       .bind(id)
       .run();
-    c.executionCtx.waitUntil(
-      removeBookingFromGoogle(c.env.DB, googleCredentials(c.env), id).catch((error) =>
-        console.error('Google Calendar delete failed:', error),
-      ),
-    );
+    c.executionCtx.waitUntil((async () => {
+      await cancelBookingMeetIntegration(c.env.DB, c.env, id);
+      await removeBookingFromGoogle(c.env.DB, googleCredentials(c.env), id);
+    })().catch((error) => console.error('Google Calendar/Meet cancellation failed:', error)));
   }
 
   return c.json({ status: next });

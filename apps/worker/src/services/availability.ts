@@ -117,12 +117,19 @@ function weekdayForDate(date: string): number {
 function googleBusyForJstDate(
   intervals: Array<{ start: string; end: string }>,
   date: string,
+  bufferAfterMinutes: number,
 ): Interval[] {
   const dayStart = new Date(`${date}T00:00:00+09:00`).getTime();
   const dayEnd = dayStart + 24 * 60 * 60_000;
   return intervals.flatMap((interval) => {
     const start = Math.max(new Date(interval.start).getTime(), dayStart);
-    const end = Math.min(new Date(interval.end).getTime(), dayEnd);
+    // Google予定が終わった直後にも準備時間を確保する。予約枠側の
+    // `duration + buffer_after` が次のGoogle予定の前側を守るため、これで
+    // 既存予定の前後とも同じバッファになる。
+    const end = Math.min(
+      new Date(interval.end).getTime() + bufferAfterMinutes * 60_000,
+      dayEnd,
+    );
     if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) return [];
     const startMin = Math.floor((start - dayStart) / 60_000);
     const endMin = Math.ceil((end - dayStart) / 60_000);
@@ -133,7 +140,7 @@ function googleBusyForJstDate(
 export async function getAvailability(
   db: D1Database,
   params: GetAvailabilityParams,
-): Promise<{ by_staff: AvailabilityByStaff[] }> {
+): Promise<{ by_staff: AvailabilityByStaff[]; calendar_sync?: CalendarSyncState[] }> {
   const menu = await db
     .prepare(
       `SELECT m.duration_minutes, m.buffer_after_minutes,
@@ -273,7 +280,13 @@ export async function getAvailability(
           end: jstHHMM(new Date(b.block_ends_at)),
         }));
       const googleBusy = googleBusyByStaff.get(s.id);
-      if (googleBusy) dayBookings.push(...googleBusyForJstDate(googleBusy, date));
+      if (googleBusy) {
+        dayBookings.push(...googleBusyForJstDate(
+          googleBusy,
+          date,
+          menuForCalc.buffer_after_minutes,
+        ));
+      }
       const daySlots = computeSlots({
         working: [{ start: working.start_time, end: working.end_time }],
         busy: dayBookings,

@@ -19,13 +19,13 @@ const DAYS: Array<{ key: DayKey; weekday: number; label: string; tone: string }>
 
 type WeeklyTemplate = Record<DayKey, { start: string; end: string } | null>
 const DEFAULT_TEMPLATE: WeeklyTemplate = {
-  sun: null,
-  mon: { start: '10:00', end: '19:00' },
-  tue: { start: '10:00', end: '19:00' },
-  wed: { start: '10:00', end: '19:00' },
-  thu: { start: '10:00', end: '19:00' },
-  fri: { start: '10:00', end: '19:00' },
-  sat: { start: '10:00', end: '19:00' },
+  sun: { start: '08:00', end: '21:00' },
+  mon: { start: '08:00', end: '21:00' },
+  tue: { start: '08:00', end: '21:00' },
+  wed: { start: '08:00', end: '21:00' },
+  thu: { start: '08:00', end: '21:00' },
+  fri: { start: '08:00', end: '21:00' },
+  sat: { start: '08:00', end: '21:00' },
 }
 
 export default function StaffShiftsPage() {
@@ -46,6 +46,10 @@ export default function StaffShiftsPage() {
   const [savingCalendar, setSavingCalendar] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+  const [manualDate, setManualDate] = useState('')
+  const [manualStart, setManualStart] = useState('08:00')
+  const [manualEnd, setManualEnd] = useState('21:00')
+  const [savingManual, setSavingManual] = useState(false)
 
   const load = useCallback(async () => {
     if (!selectedAccountId || !staffId) return
@@ -142,9 +146,33 @@ export default function StaffShiftsPage() {
   }
 
   async function deleteShift(shiftId: string) {
-    if (!selectedAccountId || !confirm('この日付別の応急枠を削除しますか？')) return
+    if (!selectedAccountId || !confirm('この手動優先枠を削除しますか？')) return
     await bookingApi.deleteShift(selectedAccountId, staffId, shiftId)
     await load()
+  }
+
+  async function saveManualShift() {
+    if (!selectedAccountId || !manualDate || manualStart >= manualEnd) {
+      setError('日付と正しい開始・終了時刻を入力してください。')
+      return
+    }
+    setSavingManual(true)
+    setError(null)
+    setSuccess(null)
+    try {
+      await bookingApi.putShifts(selectedAccountId, staffId, [{
+        work_date: manualDate,
+        start_time: manualStart,
+        end_time: manualEnd,
+      }])
+      setSuccess(`${manualDate} の手動優先枠を保存しました。この日は毎週設定よりこちらが優先されます。`)
+      setManualDate('')
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingManual(false)
+    }
   }
 
   return (
@@ -180,7 +208,7 @@ export default function StaffShiftsPage() {
                       checked={current !== null}
                       onChange={(event) => setTemplate((previous) => ({
                         ...previous,
-                        [day.key]: event.target.checked ? { start: '10:00', end: '19:00' } : null,
+                        [day.key]: event.target.checked ? { start: '08:00', end: '21:00' } : null,
                       }))}
                       className="h-4 w-4"
                     />
@@ -252,10 +280,17 @@ export default function StaffShiftsPage() {
 
           <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
             <div className="border-b border-gray-200 bg-gray-50 px-5 py-4">
-              <h2 className="font-semibold text-gray-900">日付別の応急枠 ({shifts.length}件)</h2>
-              <p className="mt-1 text-sm text-gray-500">以前に作成した枠です。同じ日付では毎週設定よりこちらを優先します。</p>
+              <h2 className="font-semibold text-gray-900">日付別の手動優先枠 ({shifts.length}件)</h2>
+              <p className="mt-1 text-sm text-gray-500">同じ日付では、毎週設定よりこの時間を優先します。Googleカレンダーの予定はこの中から引き続き除外されます。</p>
             </div>
-            {shifts.length === 0 ? <div className="p-8 text-center text-sm text-gray-500">応急枠はありません</div> : (
+            <div className="grid gap-3 border-b border-gray-100 p-5 sm:grid-cols-[1.2fr_1fr_auto_1fr_auto] sm:items-end">
+              <label className="text-sm"><span className="mb-1 block text-gray-600">日付</span><input type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2" /></label>
+              <label className="text-sm"><span className="mb-1 block text-gray-600">開始</span><input type="time" value={manualStart} onChange={(e) => setManualStart(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2" /></label>
+              <span className="hidden pb-2 text-gray-400 sm:block">〜</span>
+              <label className="text-sm"><span className="mb-1 block text-gray-600">終了</span><input type="time" value={manualEnd} onChange={(e) => setManualEnd(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2" /></label>
+              <button onClick={saveManualShift} disabled={savingManual || !manualDate} className="rounded-lg bg-[#06C755] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{savingManual ? '保存中…' : '手動枠を保存'}</button>
+            </div>
+            {shifts.length === 0 ? <div className="p-8 text-center text-sm text-gray-500">手動優先枠はありません</div> : (
               <div className="max-h-72 overflow-y-auto">
                 <table className="w-full text-sm">
                   <thead className="sticky top-0 bg-white"><tr className="border-b"><th className="px-5 py-3 text-left">日付</th><th className="px-5 py-3 text-left">時間</th><th className="px-5 py-3 text-right">操作</th></tr></thead>
