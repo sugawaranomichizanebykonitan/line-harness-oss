@@ -2,7 +2,7 @@
  * SQL fragment that extracts the per-user portion of a LINE profile picture
  * URL — the middle 80 chars after the CDN host prefix. Same value across
  * channels for the same human, so this is the only signal that bridges
- * provider-disjoint user_id namespaces (e.g. L Harness ↔ X Harness).
+ * provider-disjoint user_id namespaces (e.g. Frei management ↔ X Harness).
  *
  * Returns NULL when picture_url is absent or hosted on an unrecognized CDN.
  *

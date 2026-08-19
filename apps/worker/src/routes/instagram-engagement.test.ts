@@ -32,7 +32,7 @@ beforeEach(() => {
 });
 
 describe('IG Harness engagement receiver', () => {
-  it('requires the L Harness connection API key', async () => {
+  it('requires the Frei management connection API key', async () => {
     expect((await call({}, '')).status).toBe(401);
   });
 

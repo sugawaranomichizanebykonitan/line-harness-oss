@@ -40,7 +40,7 @@ describe('replyViaHarnessProxy', () => {
         [{ type: 'text', text: 'test' }],
         dispatch,
       ),
-    ).rejects.toThrow('L Harness proxy error: 400 Bad Request');
+    ).rejects.toThrow('株式会社Frei キャリアコンサル管理 proxy error: 400 Bad Request');
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
 });

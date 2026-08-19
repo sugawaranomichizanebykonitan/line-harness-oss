@@ -964,7 +964,7 @@ async function scheduled(
   }
 
   // 外部Google Calendarで確定したMeet個別相談。前日・1時間前のLINE通知を
-  // D1で管理し、送信は必ずL Harness Proxyを通す。
+  // D1で管理し、送信は必ず株式会社FreiのLINE Proxyを通す。
   try {
     const result = await processDueMeetConsultationReminders(env.DB, {
       now: new Date(),

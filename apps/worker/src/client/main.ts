@@ -1,5 +1,5 @@
 /**
- * L Harness LIFF — The single entry point
+ * 株式会社Frei キャリアコンサル管理 LIFF — The single entry point
  *
  * This URL IS the friend-add URL. Every user enters through here.
  *
