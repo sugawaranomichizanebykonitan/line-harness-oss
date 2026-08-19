@@ -303,8 +303,11 @@ async function syncConfirmedBookingIntegrations(
       endsAt: details.ends_at,
       meetUrl: synced.meetUrl,
     };
-    if (env.WORKER_URL && env.API_KEY) {
-      const response = await fetch(new URL('/api/meet-consultations', env.WORKER_URL), {
+    // WORKER_URL は過去ドメインとの互換用に残ることがある。別 origin への
+    // redirect では Authorization が外れるため、現在の公開URLを優先する。
+    const workerApiUrl = env.WORKER_PUBLIC_URL?.trim() || env.WORKER_URL?.trim();
+    if (workerApiUrl && env.API_KEY) {
+      const response = await fetch(new URL('/api/meet-consultations', workerApiUrl), {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${env.API_KEY}`,
@@ -334,10 +337,11 @@ async function cancelBookingMeetIntegration(
     .bind(bookingId)
     .first<{ external_event_id: string | null }>();
   if (bookingRow?.external_event_id) {
-    if (env.WORKER_URL && env.API_KEY) {
+    const workerApiUrl = env.WORKER_PUBLIC_URL?.trim() || env.WORKER_URL?.trim();
+    if (workerApiUrl && env.API_KEY) {
       const endpoint = new URL(
         `/api/meet-consultations/${encodeURIComponent(bookingRow.external_event_id)}`,
-        env.WORKER_URL,
+        workerApiUrl,
       );
       const response = await fetch(endpoint, {
         method: 'DELETE',
