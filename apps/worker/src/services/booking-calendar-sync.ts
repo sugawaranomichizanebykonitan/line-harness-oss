@@ -133,7 +133,7 @@ export async function syncConfirmedBookingToGoogle(
     start: row.starts_at,
     end: row.ends_at,
     description: [
-      `L Harness予約（担当: ${row.staff_name}）`,
+      `株式会社Frei キャリアコンサル管理（担当: ${row.staff_name}）`,
       `予約ID: ${row.id}`,
       row.customer_note ? `メモ: ${row.customer_note}` : '',
     ].filter(Boolean).join('\n'),

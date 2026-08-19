@@ -336,7 +336,7 @@ describe('auto_reply マッチ除外', () => {
   test('auto_reply のスコープを跨いで keyword echo を除外する', async () => {
     // 1 アカウントだけに登録された button label でも、別アカウントの友だちが
     // 同じ文字列を送ってきたら button label echo と見なして除外する。
-    // (本番事故 2026-05-08: L Harness ② のユーザーが「体験を完了する」と送って
+    // (本番事故 2026-05-08: 株式会社Frei キャリアコンサル管理②のユーザーが「体験を完了する」と送って
     //  ①b 専用ルールしか無かったため未対応に大量出現していた)
     const db = stubDB({
       rows: [

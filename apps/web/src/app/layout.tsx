@@ -3,8 +3,8 @@ import './globals.css'
 import AppShell from '@/components/app-shell'
 
 export const metadata: Metadata = {
-  title: 'L Harness',
-  description: 'L Harness 管理画面',
+  title: '株式会社Frei キャリアコンサル管理',
+  description: '株式会社Frei キャリアコンサル管理画面',
 }
 
 export default function RootLayout({
