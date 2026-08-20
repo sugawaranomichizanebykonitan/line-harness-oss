@@ -2181,3 +2181,48 @@ export const webinarApi = {
   userComments: (id: string) =>
     fetchApi<{ data: WebinarUserComment[] }>(`/api/webinars/${id}/user-comments`),
 }
+
+export type WahmsOverview = {
+  account: { id: string; name: string; channel_id: string }
+  summary: {
+    participants: number
+    applications: number
+    surveyResponses: number
+    averageSatisfaction: number | null
+    unbelievableRate: number
+    pendingQuestions: number
+  }
+  schools: Array<{ school_name: string; latest_date: string | null; application_count: number }>
+  participants: Array<Record<string, unknown> & { id: string; name?: string; line_display_name?: string; occupation?: string; status?: string; booking_count?: number }>
+  applications: Array<Record<string, unknown> & { id: string; participant_name?: string; school_name: string; event_date?: string; event_time?: string; theme?: string; attended?: number | null }>
+  surveys: Array<Record<string, unknown> & { id: string; responded_at?: string; school_name: string; satisfaction?: number; value_rating?: string; next_intent?: string; question?: string; answer?: string; respondent_name?: string; response_status: 'none' | 'pending' | 'completed' }>
+  archives: Array<Record<string, unknown> & { id: string; school_name: string; lecture_number?: string; theme?: string; held_on?: string; youtube_url?: string }>
+  deliveryLogs: Array<Record<string, unknown> & { id: string; delivery_type: string; title: string; success_count: number; failure_count: number; created_at: string }>
+}
+
+export const wahmsApi = {
+  overview: (accountId: string, params?: { school?: string; search?: string }) => {
+    const query = new URLSearchParams({ accountId })
+    if (params?.school) query.set('school', params.school)
+    if (params?.search) query.set('search', params.search)
+    return fetchApi<ApiResponse<WahmsOverview>>(`/api/wahms/overview?${query}`)
+  },
+  reply: (accountId: string, surveyId: string, answer: string) =>
+    fetchApi<ApiResponse<{ id: string; status: string }>>(`/api/wahms/surveys/${surveyId}/reply?accountId=${encodeURIComponent(accountId)}`, {
+      method: 'POST', body: JSON.stringify({ answer }),
+    }),
+  sendSurvey: (accountId: string, schoolName: string, eventDate: string) =>
+    fetchApi<ApiResponse<{ targetCount: number; success: number; failure: number }>>(`/api/wahms/survey-deliveries?accountId=${encodeURIComponent(accountId)}`, {
+      method: 'POST', body: JSON.stringify({ schoolName, eventDate }),
+    }),
+  sendFlex: (accountId: string, altText: string, contents: unknown) =>
+    fetchApi<ApiResponse<{ sent: boolean }>>(`/api/wahms/flex-deliveries?accountId=${encodeURIComponent(accountId)}`, {
+      method: 'POST', body: JSON.stringify({ altText, contents }),
+    }),
+  createArchive: (accountId: string, data: { schoolName: string; lectureNumber?: string; theme?: string; heldOn?: string; youtubeUrl?: string }) =>
+    fetchApi<ApiResponse<{ id: string }>>(`/api/wahms/archives?accountId=${encodeURIComponent(accountId)}`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+  deleteArchive: (accountId: string, id: string) =>
+    fetchApi<ApiResponse<null>>(`/api/wahms/archives/${id}?accountId=${encodeURIComponent(accountId)}`, { method: 'DELETE' }),
+}

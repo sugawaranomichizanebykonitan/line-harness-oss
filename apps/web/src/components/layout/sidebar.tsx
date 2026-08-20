@@ -80,6 +80,13 @@ const menuSections = [
   },
 ]
 
+const wahmsSection = {
+  label: 'WAHMS',
+  items: [
+    { href: '/wahms', label: '参加者・講義管理', icon: 'M9 17v-2a4 4 0 014-4h2a4 4 0 014 4v2M9 17H5a2 2 0 01-2-2V5a2 2 0 012-2h10a2 2 0 012 2v6M8 7h4m-4 4h2' },
+  ],
+}
+
 function AccountAvatar({ account, size = 32 }: { account: AccountWithStats; size?: number }) {
   const displayName = account.displayName || account.name
   if (account.pictureUrl) {
@@ -277,7 +284,7 @@ export default function Sidebar() {
 
       {/* ナビゲーション */}
       <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-        {menuSections.map((section, si) => (
+        {(isWahms ? [wahmsSection, ...menuSections] : menuSections).map((section, si) => (
           <div key={si}>
             {section.label && (
               <div className="pt-5 pb-2 px-3">

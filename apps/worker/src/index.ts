@@ -88,6 +88,7 @@ import { instagramEngagement } from './routes/instagram-engagement.js';
 import adminVersion from './routes/admin-version.js';
 import adminUpdate from './routes/admin-update.js';
 import { mediaInquiries } from './routes/media-inquiries.js';
+import { wahms } from './routes/wahms.js';
 import { isLinkPreviewBot } from './lib/og-bot.js';
 import { buildOgHtml } from './lib/og-html.js';
 import {
@@ -204,6 +205,7 @@ app.route('/', openapi);
 app.route('/', liffRoutes);
 app.route('/', affiliateSelfRoutes);
 app.route('/', mediaInquiries);
+app.route('/', wahms);
 
 // Mount route groups — Round 3
 app.route('/', webhooks);

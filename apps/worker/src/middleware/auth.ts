@@ -137,6 +137,10 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
   // /api/ で始まらないパスは認証 skip して static asset として返す。
   // (admin は別ホスト、Worker の non-API path はすべて LIFF/SPA 経由)
   const method = c.req.method.toUpperCase();
+  // WAHMS Apps Script mirrors new participants/bookings/surveys into D1.
+  // This endpoint authenticates with the registered LINE channel token inside
+  // its own route, so it must bypass staff-cookie authentication here.
+  if (method === 'POST' && path === '/api/wahms/sync') return next();
   if (!path.startsWith('/api/')) {
     // ただし内部用エンドポイント (/webhook, /auth, /setup) は元の skip 判定に任せる
     if (
