@@ -43,6 +43,10 @@ vi.mock('../services/event-bus.js', () => ({
   logOutgoingMessage: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../services/activity-mileage.js', () => ({
+  awardActivityMileage: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('../services/local-line-proxy.js', () => ({
   dispatchLineProxyLocally: vi.fn().mockResolvedValue(new Response(null, { status: 200 })),
 }));
@@ -237,6 +241,91 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
     expect(executionCtx.waitUntil).toHaveBeenCalledTimes(2);
     const bridge = vi.mocked(executionCtx.waitUntil).mock.calls[1]?.[0] as Promise<unknown>;
     await bridge;
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://script.google.test/exec',
+      expect.objectContaining({ method: 'POST', body: rawBody }),
+    );
+    fetchSpy.mockRestore();
+  });
+
+  test('records WAHMS text but leaves the one-time reply token exclusively to GAS', async () => {
+    vi.mocked(verifySignature).mockResolvedValue(true);
+    vi.mocked(jstNow).mockReturnValue('2026-08-20T15:45:12.000+09:00');
+    vi.mocked(getLineAccounts).mockResolvedValue([
+      {
+        id: 'wahms-account',
+        channel_id: 'wahms-channel',
+        channel_access_token: 'wahms-token',
+        channel_secret: 'env-default-secret',
+        name: 'WAHMS',
+        is_active: 1,
+      } as never,
+    ]);
+    vi.mocked(getFriendByLineUserId).mockResolvedValue({
+      id: 'friend-1',
+      line_user_id: 'U-existing',
+      display_name: 'Existing Friend',
+      picture_url: null,
+      status_message: null,
+      is_following: 1,
+      user_id: null,
+      line_account_id: 'wahms-account',
+      metadata: '{}',
+      first_tracked_link_id: null,
+      created_at: '2026-08-20T15:00:00.000+09:00',
+      updated_at: '2026-08-20T15:00:00.000+09:00',
+    });
+
+    const stmt = {
+      bind: vi.fn(),
+      run: vi.fn().mockResolvedValue({}),
+    };
+    stmt.bind.mockReturnValue(stmt);
+    const db = { prepare: vi.fn().mockReturnValue(stmt) } as unknown as D1Database;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
+    const executionCtx = {
+      waitUntil: vi.fn(),
+      passThroughOnException: vi.fn(),
+      props: {},
+    } as unknown as ExecutionContext;
+    const rawBody = JSON.stringify({
+      destination: 'wahms',
+      events: [{
+        type: 'message',
+        replyToken: 'reply-once',
+        source: { type: 'user', userId: 'U-existing' },
+        message: { id: 'message-1', type: 'text', text: '今週の開催日' },
+      }],
+    });
+
+    const res = await setupApp().request(
+      '/webhook',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Line-Signature': 'A'.repeat(43) + '=',
+        },
+        body: rawBody,
+      },
+      {
+        ...baseEnv,
+        DB: db,
+        WAHMS_LEGACY_LINE_ACCOUNT_ID: 'wahms-account',
+        WAHMS_LEGACY_WEBHOOK_URL: 'https://script.google.test/exec',
+      },
+      executionCtx,
+    );
+
+    expect(res.status).toBe(200);
+    await Promise.all(
+      vi.mocked(executionCtx.waitUntil).mock.calls.map(([promise]) => promise),
+    );
+    expect(upsertChatOnMessage).toHaveBeenCalledWith(db, 'friend-1');
+    expect(fireEvent).not.toHaveBeenCalled();
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledWith(
       'https://script.google.test/exec',
       expect.objectContaining({ method: 'POST', body: rawBody }),

@@ -177,6 +177,11 @@ webhook.post('/webhook', async (c) => {
   }
 
   const lineClient = new LineClient(channelAccessToken);
+  const legacyReplyOwner = Boolean(
+    matchedAccountId &&
+    c.env.WAHMS_LEGACY_LINE_ACCOUNT_ID === matchedAccountId &&
+    c.env.WAHMS_LEGACY_WEBHOOK_URL,
+  );
 
   // 非同期処理 — LINE は ~1s 以内のレスポンスを要求
   const processingPromise = (async () => {
@@ -194,6 +199,7 @@ webhook.post('/webhook', async (c) => {
           c.env.LIFF_URL,
           c.env.IMAGES,
           proxyDispatch,
+          legacyReplyOwner,
         );
       } catch (err) {
         console.error('Error handling webhook event:', err);
@@ -230,6 +236,7 @@ async function handleEvent(
   liffUrl?: string,
   r2?: R2Bucket,
   proxyDispatch?: HarnessProxyDispatch,
+  legacyReplyOwner = false,
 ): Promise<void> {
   if (event.type === 'follow') {
     const userId =
@@ -567,6 +574,16 @@ async function handleEvent(
       metadata: { messageType: 'text' },
       occurredAt: now,
     });
+
+    // WAHMS is intentionally operated by its existing Apps Script. Both the
+    // Worker and GAS receive the same signed event, but only GAS may consume
+    // the one-time LINE replyToken. The Worker still stores the incoming
+    // message and updates the inbox, while skipping CRM reply automations that
+    // would race the established rich-menu / booking responses.
+    if (legacyReplyOwner) {
+      await upsertChatOnMessage(db, friend.id);
+      return;
+    }
 
     // Cross-account trigger: send message from another account via UUID
     if (incomingText === '体験を完了する' && lineAccountId) {
