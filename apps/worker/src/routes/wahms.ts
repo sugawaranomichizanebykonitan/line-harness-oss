@@ -47,12 +47,19 @@ async function proxySend(
   payload: unknown,
   manual = false,
 ): Promise<Response> {
-  return fetch(`${c.env.WORKER_URL}/line-api/v2/bot/message/${path}`, {
+  // Calling this same Worker over HTTP creates a Cloudflare self-request loop.
+  // Resolve the WAHMS channel token here and call LINE's Messaging API directly.
+  const account = await c.env.DB.prepare(
+    'SELECT channel_access_token FROM line_accounts WHERE id = ? AND is_active = 1',
+  ).bind(accountId).first<{ channel_access_token: string | null }>();
+  if (!account?.channel_access_token) {
+    return new Response('WAHMSのLINE送信設定が見つかりません', { status: 500 });
+  }
+  return fetch(`https://api.line.me/v2/bot/message/${path}`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${c.env.API_KEY}`,
+      Authorization: `Bearer ${account.channel_access_token}`,
       'Content-Type': 'application/json',
-      'X-Line-Account-Id': accountId,
       ...(manual ? { 'X-Line-Harness-Source': 'manual' } : {}),
     },
     body: JSON.stringify(payload),
@@ -169,14 +176,16 @@ wahms.post('/api/wahms/surveys/:id/reply', async (c) => {
 wahms.post('/api/wahms/survey-deliveries', async (c) => {
   const scope = await requireWahmsAccount(c);
   if ('error' in scope) return scope.error;
-  const body = await c.req.json<{ schoolName?: string; eventDate?: string }>();
+  const body = await c.req.json<{ schoolName?: string; eventDate?: string; testRecipientId?: string }>();
   const schoolName = body.schoolName?.trim();
   const eventDate = normalizeDate(body.eventDate || '');
   if (!schoolName || !eventDate) return c.json({ success: false, error: '学校と開催日を選択してください' }, 400);
   const targets = await c.env.DB.prepare(
     `SELECT DISTINCT line_user_id FROM wahms_applications WHERE line_account_id = ? AND school_name = ? AND REPLACE(SUBSTR(event_date, 1, 10), '/', '-') = ?`,
   ).bind(scope.account.id, schoolName, eventDate).all<{ line_user_id: string }>();
-  const ids = (targets.results || []).map((row) => row.line_user_id).filter(Boolean);
+  const ids = body.testRecipientId?.match(/^U[0-9a-f]{32}$/i)
+    ? [body.testRecipientId]
+    : (targets.results || []).map((row) => row.line_user_id).filter(Boolean);
   if (!ids.length) return c.json({ success: false, error: 'この講義の申込者が見つかりません' }, 400);
 
   const key = schoolKey(schoolName, eventDate);
@@ -196,15 +205,25 @@ wahms.post('/api/wahms/survey-deliveries', async (c) => {
 wahms.post('/api/wahms/flex-deliveries', async (c) => {
   const scope = await requireWahmsAccount(c);
   if ('error' in scope) return scope.error;
-  const body = await c.req.json<{ altText?: string; contents?: unknown }>();
+  const body = await c.req.json<{ altText?: string; contents?: unknown; testRecipientId?: string }>();
   if (!body.altText?.trim() || !body.contents || typeof body.contents !== 'object') {
     return c.json({ success: false, error: '代替テキストとFlex JSONを入力してください' }, 400);
   }
-  const response = await proxySend(c, scope.account.id, 'broadcast', {
-    messages: [{ type: 'flex', altText: body.altText.trim(), contents: body.contents }],
+  // Flex Simulatorの「contents」だけでなく、LINE Messaging API用の
+  // { type: 'flex', altText, contents } 全体を貼り付けても配信できる。
+  const candidate = body.contents as { type?: string; altText?: string; contents?: unknown };
+  const flexContents = candidate.type === 'flex' && candidate.contents ? candidate.contents : body.contents;
+  const altText = candidate.type === 'flex' && candidate.altText ? candidate.altText : body.altText.trim();
+  const testRecipientId = body.testRecipientId?.match(/^U[0-9a-f]{32}$/i) ? body.testRecipientId : null;
+  const response = await proxySend(c, scope.account.id, testRecipientId ? 'push' : 'broadcast', testRecipientId ? {
+    to: testRecipientId,
+    messages: [{ type: 'flex', altText, contents: flexContents }],
+  } : {
+    messages: [{ type: 'flex', altText, contents: flexContents }],
   });
-  await c.env.DB.prepare(`INSERT INTO wahms_delivery_logs (id, line_account_id, delivery_type, title, target_count, success_count, failure_count, created_by) VALUES (?, ?, 'flex', ?, 0, ?, ?, ?)`).bind(crypto.randomUUID(), scope.account.id, body.altText.trim(), response.ok ? 1 : 0, response.ok ? 0 : 1, c.get('staff')?.name || '担当者').run();
-  if (!response.ok) return c.json({ success: false, error: 'Flex配信に失敗しました' }, 502);
+  const upstreamDetail = response.ok ? '' : (await response.text()).slice(0, 300);
+  await c.env.DB.prepare(`INSERT INTO wahms_delivery_logs (id, line_account_id, delivery_type, title, target_count, success_count, failure_count, created_by) VALUES (?, ?, 'flex', ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), scope.account.id, altText, testRecipientId ? 1 : 0, response.ok ? 1 : 0, response.ok ? 0 : 1, c.get('staff')?.name || '担当者').run();
+  if (!response.ok) return c.json({ success: false, error: `Flex配信に失敗しました${upstreamDetail ? `: ${upstreamDetail}` : ''}` }, 502);
   return c.json({ success: true, data: { sent: true } });
 });
 

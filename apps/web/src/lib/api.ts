@@ -2211,13 +2211,13 @@ export const wahmsApi = {
     fetchApi<ApiResponse<{ id: string; status: string }>>(`/api/wahms/surveys/${surveyId}/reply?accountId=${encodeURIComponent(accountId)}`, {
       method: 'POST', body: JSON.stringify({ answer }),
     }),
-  sendSurvey: (accountId: string, schoolName: string, eventDate: string) =>
+  sendSurvey: (accountId: string, schoolName: string, eventDate: string, testRecipientId?: string) =>
     fetchApi<ApiResponse<{ targetCount: number; success: number; failure: number }>>(`/api/wahms/survey-deliveries?accountId=${encodeURIComponent(accountId)}`, {
-      method: 'POST', body: JSON.stringify({ schoolName, eventDate }),
+      method: 'POST', body: JSON.stringify({ schoolName, eventDate, testRecipientId }),
     }),
-  sendFlex: (accountId: string, altText: string, contents: unknown) =>
+  sendFlex: (accountId: string, altText: string, contents: unknown, testRecipientId?: string) =>
     fetchApi<ApiResponse<{ sent: boolean }>>(`/api/wahms/flex-deliveries?accountId=${encodeURIComponent(accountId)}`, {
-      method: 'POST', body: JSON.stringify({ altText, contents }),
+      method: 'POST', body: JSON.stringify({ altText, contents, testRecipientId }),
     }),
   createArchive: (accountId: string, data: { schoolName: string; lectureNumber?: string; theme?: string; heldOn?: string; youtubeUrl?: string }) =>
     fetchApi<ApiResponse<{ id: string }>>(`/api/wahms/archives?accountId=${encodeURIComponent(accountId)}`, {
