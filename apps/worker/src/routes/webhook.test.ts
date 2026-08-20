@@ -191,6 +191,60 @@ describe('POST /webhook — DoS defenses (#104)', () => {
   });
 });
 
+describe('POST /webhook — WAHMS legacy bridge', () => {
+  test('mirrors a signed WAHMS payload to the existing Apps Script endpoint', async () => {
+    vi.mocked(verifySignature).mockResolvedValue(true);
+    vi.mocked(getLineAccounts).mockResolvedValue([
+      {
+        id: 'wahms-account',
+        channel_id: 'wahms-channel',
+        channel_access_token: 'wahms-token',
+        channel_secret: 'env-default-secret',
+        name: 'WAHMS',
+        is_active: 1,
+      } as never,
+    ]);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
+    const executionCtx = {
+      waitUntil: vi.fn(),
+      passThroughOnException: vi.fn(),
+      props: {},
+    } as unknown as ExecutionContext;
+    const rawBody = JSON.stringify({ destination: 'wahms', events: [] });
+
+    const res = await setupApp().request(
+      '/webhook',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Line-Signature': 'A'.repeat(43) + '=',
+        },
+        body: rawBody,
+      },
+      {
+        ...baseEnv,
+        WAHMS_LEGACY_LINE_ACCOUNT_ID: 'wahms-account',
+        WAHMS_LEGACY_WEBHOOK_URL: 'https://script.google.test/exec',
+      },
+      executionCtx,
+    );
+
+    expect(res.status).toBe(200);
+    expect(executionCtx.waitUntil).toHaveBeenCalledTimes(2);
+    const bridge = vi.mocked(executionCtx.waitUntil).mock.calls[1]?.[0] as Promise<unknown>;
+    await bridge;
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://script.google.test/exec',
+      expect.objectContaining({ method: 'POST', body: rawBody }),
+    );
+    fetchSpy.mockRestore();
+  });
+});
+
 describe('POST /webhook — postback events', () => {
   test('fires postback_received with postback.data so IF-THEN automations run on rich menu taps', async () => {
     vi.mocked(verifySignature).mockResolvedValue(true);

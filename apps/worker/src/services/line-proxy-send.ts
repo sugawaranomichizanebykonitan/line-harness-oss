@@ -38,7 +38,7 @@ export async function pushViaHarnessProxy(
 
   const body = await response.text().catch(() => '');
   throw new Error(
-    `株式会社Frei キャリアコンサル管理 proxy error: ${response.status} ${response.statusText} — ${body.slice(0, 500)}`,
+    `公式LINE統合管理 proxy error: ${response.status} ${response.statusText} — ${body.slice(0, 500)}`,
   );
 }
 
@@ -67,6 +67,6 @@ export async function replyViaHarnessProxy(
 
   const body = await response.text().catch(() => '');
   throw new Error(
-    `株式会社Frei キャリアコンサル管理 proxy error: ${response.status} ${response.statusText} — ${body.slice(0, 500)}`,
+    `公式LINE統合管理 proxy error: ${response.status} ${response.statusText} — ${body.slice(0, 500)}`,
   );
 }

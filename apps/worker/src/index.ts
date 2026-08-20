@@ -105,6 +105,10 @@ export type Env = {
     LINE_CHANNEL_ACCESS_TOKEN: string;
     API_KEY: string;
     LEGACY_API_KEY?: string;
+    // Optional per-account bridge used while a migrated LINE account keeps
+    // its existing Apps Script automations and spreadsheet operations.
+    WAHMS_LEGACY_WEBHOOK_URL?: string;
+    WAHMS_LEGACY_LINE_ACCOUNT_ID?: string;
     LIFF_URL: string;
     LINE_CHANNEL_ID: string;
     LINE_LOGIN_CHANNEL_ID: string;

@@ -70,10 +70,10 @@ export default function LoginPage() {
       <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-sm">
         <div className="text-center mb-6">
           <div className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-lg mx-auto mb-3" style={{ backgroundColor: '#06C755' }}>
-            F
+            LINE
           </div>
-          <h1 className="text-xl font-bold text-gray-900">株式会社Frei</h1>
-          <p className="text-sm font-medium text-gray-700 mt-1">キャリアコンサル管理</p>
+          <h1 className="text-xl font-bold text-gray-900">公式LINE 統合管理</h1>
+          <p className="text-sm font-medium text-gray-700 mt-1">アカウントをまとめて管理</p>
           <p className="text-sm text-gray-500 mt-1">管理画面にログイン</p>
         </div>
 

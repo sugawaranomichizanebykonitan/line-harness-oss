@@ -637,6 +637,16 @@ forms.post('/api/forms/:id/submit', async (c) => {
             ref_code: (friend as unknown as Record<string, string | null>).ref_code,
             metadata: resolvedMeta,
           };
+          const accountBrand = await db
+            .prepare(
+              `SELECT la.name
+                 FROM line_accounts la
+                 INNER JOIN friends f ON f.line_account_id = la.id
+                WHERE f.id = ?
+                LIMIT 1`,
+            )
+            .bind(friend.id)
+            .first<{ name: string }>();
 
           // Build diagnostic result Flex card showing their answers
           const entries = Object.entries(submissionData as Record<string, unknown>);
@@ -668,7 +678,7 @@ forms.post('/api/forms/:id/submit', async (c) => {
               contents: [
                 ...answerRows,
                 { type: 'separator', margin: 'lg' },
-                { type: 'text', text: 'フォームの回答内容に合わせて、株式会社Freiからリアルタイムでご案内します。', size: 'xs', color: '#06C755', weight: 'bold', wrap: true, margin: 'lg' },
+                { type: 'text', text: `フォームの回答内容に合わせて、${accountBrand?.name ?? '公式LINE'}からリアルタイムでご案内します。`, size: 'xs', color: '#06C755', weight: 'bold', wrap: true, margin: 'lg' },
               ],
               paddingAll: '20px',
             },

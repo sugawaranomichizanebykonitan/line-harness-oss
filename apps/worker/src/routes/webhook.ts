@@ -33,6 +33,24 @@ const webhook = new Hono<Env>();
 // 128 MB Cloudflare Workers memory ceiling.
 const MAX_WEBHOOK_BODY_SIZE = 1024 * 1024; // 1 MiB
 
+async function forwardToLegacyWebhook(url: string, rawBody: string): Promise<void> {
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: rawBody,
+      redirect: 'follow',
+    });
+    if (!response.ok) {
+      console.error(`[webhook] Legacy bridge returned ${response.status}`);
+    }
+  } catch (err) {
+    // The new CRM still records the event even if the legacy automation is
+    // temporarily unavailable. LINE retries are handled by the source system.
+    console.error('[webhook] Legacy bridge failed', err);
+  }
+}
+
 async function ensureFriendFromWebhookUser(
   db: D1Database,
   lineClient: LineClient,
@@ -184,6 +202,20 @@ webhook.post('/webhook', async (c) => {
   })();
 
   c.executionCtx.waitUntil(processingPromise);
+
+  // WAHMS already has business-critical Apps Script behavior (school signup,
+  // profile/lecture surveys, spreadsheet history, reminders, FAQ/archive rich
+  // menu replies). Mirror the signed WAHMS payload after CRM ingestion so both
+  // the new unified management screen and the established operation continue.
+  if (
+    matchedAccountId &&
+    c.env.WAHMS_LEGACY_LINE_ACCOUNT_ID === matchedAccountId &&
+    c.env.WAHMS_LEGACY_WEBHOOK_URL
+  ) {
+    c.executionCtx.waitUntil(
+      forwardToLegacyWebhook(c.env.WAHMS_LEGACY_WEBHOOK_URL, rawBody),
+    );
+  }
 
   return c.json({ status: 'ok' }, 200);
 });

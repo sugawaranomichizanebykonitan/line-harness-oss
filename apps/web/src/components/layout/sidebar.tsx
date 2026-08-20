@@ -200,6 +200,7 @@ function NavIcon({ d }: { d: string }) {
 
 export default function Sidebar() {
   const pathname = usePathname()
+  const { selectedAccount } = useAccount()
   const [isOpen, setIsOpen] = useState(false)
   const [staffName, setStaffName] = useState<string | null>(null)
   const [staffRole, setStaffRole] = useState<string | null>(null)
@@ -241,6 +242,14 @@ export default function Sidebar() {
   }, [])
 
   useEffect(() => { setIsOpen(false) }, [pathname])
+  const accountName = selectedAccount?.displayName || selectedAccount?.name || '公式LINE'
+  const isWahms = accountName.toUpperCase().includes('WAHMS')
+  const managementLabel = isWahms ? '公式LINE管理' : 'キャリアコンサル管理'
+  const accountMark = isWahms ? 'W' : accountName.includes('Frei') ? 'F' : accountName.charAt(0)
+
+  useEffect(() => {
+    document.title = `${accountName} ${managementLabel}`
+  }, [accountName, managementLabel])
   useEffect(() => {
     document.body.style.overflow = isOpen ? 'hidden' : ''
     return () => { document.body.style.overflow = '' }
@@ -254,11 +263,11 @@ export default function Sidebar() {
       <div className="px-6 py-5 border-b border-gray-200">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm" style={{ backgroundColor: '#06C755' }}>
-            F
+            {accountMark}
           </div>
           <div>
-            <p className="text-sm font-bold text-gray-900 leading-tight">株式会社Frei</p>
-            <p className="text-xs text-gray-400">キャリアコンサル管理</p>
+            <p className="text-sm font-bold text-gray-900 leading-tight">{accountName}</p>
+            <p className="text-xs text-gray-400">{managementLabel}</p>
           </div>
         </div>
       </div>
@@ -329,7 +338,7 @@ export default function Sidebar() {
         )}
         <div className="px-6 py-4 space-y-3">
         <div className="space-y-0.5">
-          <p className="text-xs text-gray-400">株式会社Frei キャリアコンサル管理 v{appVersion}</p>
+          <p className="text-xs text-gray-400">{accountName} {managementLabel} v{appVersion}</p>
           <p className="text-[10px] text-gray-400 font-mono break-all">
             build {appCommitSha}{appBuildDate ? ` · ${appBuildDate}` : ''}
           </p>
@@ -382,10 +391,10 @@ export default function Sidebar() {
           </svg>
         </button>
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white font-bold text-xs" style={{ backgroundColor: '#06C755' }}>F</div>
+          <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white font-bold text-xs" style={{ backgroundColor: '#06C755' }}>{accountMark}</div>
           <div>
-            <p className="text-sm font-bold text-gray-900 leading-tight">株式会社Frei</p>
-            <p className="text-[11px] text-gray-500 leading-tight">キャリアコンサル管理</p>
+            <p className="text-sm font-bold text-gray-900 leading-tight">{accountName}</p>
+            <p className="text-[11px] text-gray-500 leading-tight">{managementLabel}</p>
           </div>
         </div>
       </div>
