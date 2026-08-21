@@ -140,15 +140,52 @@ export async function authenticateApiToken(
 }
 
 /**
- * アカウント限定スタッフでも通してよいパス。ログイン状態の確認と、
- * 自分が担当するアカウントを知るための一覧取得だけ。
- * 一覧の中身は /api/line-accounts 側でスタッフのスコープに絞り込む。
+ * アカウントに紐づかない共通データ。担当が限定されたスタッフでも触れないと
+ * チャット画面が成立しないもの (対応者一覧、タグ、定型文など) を通す。
+ * 顧客データそのものではないので、担当アカウント外の情報は含まれない。
  */
-const ACCOUNT_SCOPE_ALLOWED_GET = new Set([
-  '/api/auth/session',
-  '/api/line-accounts',
-  '/api/capabilities',
-]);
+const ACCOUNT_AGNOSTIC = [
+  /^\/api\/auth\/session$/,
+  /^\/api\/capabilities$/,
+  /^\/api\/line-accounts$/, // 中身はルート側で担当分だけに絞る
+  /^\/api\/operators(\/[^/]+)?$/,
+  /^\/api\/tags(\/[^/]+)?$/,
+  /^\/api\/templates(\/[^/]+)?$/,
+  /^\/api\/message-templates(\/[^/]+)?$/,
+  /^\/api\/account-settings/,
+];
+
+/**
+ * ID で個別のデータを指すパス。アカウントを問い合わせに含められないので、
+ * そのデータが実際にどのLINEアカウントのものかをDBに聞いて判定する。
+ *
+ * ここに無いID指定パスは fail-closed で 403 になる。
+ * 谷口さんのような担当限定スタッフが実際に使う画面から順に追加していく。
+ */
+const OWNERSHIP_RULES: { re: RegExp; sql: string }[] = [
+  {
+    // /api/chats/:id は chats.id と friends.id のどちらでも受け付ける仕様
+    // (ルート側が公開IDを friend_id に統一しているため、実際に来るのは
+    // ほぼ friends.id)。両方を引いて、先に見つかった方の所属を採用する。
+    // chats.line_account_id は後から追加された列で NULL のことがあるので、
+    // friends 側にフォールバックして必ずアカウントを特定する。
+    re: /^\/api\/chats\/([^/]+)(?:\/.*)?$/,
+    sql: `SELECT COALESCE(c.line_account_id, cf.line_account_id, f.line_account_id) AS account
+          FROM (SELECT ? AS key) k
+          LEFT JOIN chats   c  ON c.id = k.key
+          LEFT JOIN friends cf ON cf.id = c.friend_id
+          LEFT JOIN friends f  ON f.id = k.key
+          WHERE c.id IS NOT NULL OR f.id IS NOT NULL`,
+  },
+  { re: /^\/api\/friends\/([^/]+)(?:\/.*)?$/, sql: 'SELECT line_account_id AS account FROM friends WHERE id = ?' },
+  { re: /^\/api\/conversations\/([^/]+)$/, sql: 'SELECT line_account_id AS account FROM friends WHERE id = ?' },
+  { re: /^\/api\/broadcasts\/([^/]+)(?:\/.*)?$/, sql: 'SELECT line_account_id AS account FROM broadcasts WHERE id = ?' },
+  { re: /^\/api\/scenarios\/([^/]+)(?:\/.*)?$/, sql: 'SELECT line_account_id AS account FROM scenarios WHERE id = ?' },
+  { re: /^\/api\/tracked-links\/([^/]+)(?:\/.*)?$/, sql: 'SELECT line_account_id AS account FROM tracked_links WHERE id = ?' },
+  { re: /^\/api\/auto-replies\/([^/]+)(?:\/.*)?$/, sql: 'SELECT line_account_id AS account FROM auto_replies WHERE id = ?' },
+  { re: /^\/api\/events\/([^/]+)(?:\/.*)?$/, sql: 'SELECT line_account_id AS account FROM events WHERE id = ?' },
+  { re: /^\/api\/reminders\/([^/]+)(?:\/.*)?$/, sql: 'SELECT line_account_id AS account FROM reminders WHERE id = ?' },
+];
 
 /** リクエストが対象にしている LINE アカウントを取り出す。 */
 function requestedAccountId(c: Context<Env>): string | null {
@@ -162,15 +199,22 @@ function requestedAccountId(c: Context<Env>): string | null {
 }
 
 /**
- * アカウント限定スタッフのアクセス制御。fail-closed。
+ * アカウント限定スタッフのアクセス制御。
  *
  * 42 ファイルに散らばる accountId 受け取り箇所を個別に直すのは漏れが出るので、
- * 「対象アカウントを明示していないリクエストは通さない」方針で一括して塞ぐ。
- * 明示していても自分の担当と違えば 403。
+ * 認証の関門で一度だけ判定する。判定は次の順。
+ *
+ *   1. アカウントを明示している → 担当と一致すれば通す。違えば 403。
+ *   2. ID で個別データを指している → そのデータの所属アカウントをDBに聞いて判定。
+ *   3. アカウントに紐づかない共通データ → 通す。
+ *   4. それ以外 (アカウント指定のない一覧など) → 403。
+ *
+ * 4 を fail-closed にしているのは、/api/friends のようにアカウント指定を
+ * 省略すると全アカウント横断で返すエンドポイントがあるため。
  *
  * 戻り値が Response ならそこで打ち切る。null なら通してよい。
  */
-export function enforceAccountScope(c: Context<Env>): Response | null {
+export async function enforceAccountScope(c: Context<Env>): Promise<Response | null> {
   const staff = c.get('staff') as AuthenticatedStaff | undefined;
   if (!staff?.lineAccountId) return null; // 全アカウント権限
 
@@ -178,35 +222,60 @@ export function enforceAccountScope(c: Context<Env>): Response | null {
   const method = c.req.method.toUpperCase();
 
   if (path === '/api/auth/logout') return null;
-  if (method === 'GET' && ACCOUNT_SCOPE_ALLOWED_GET.has(path)) return null;
 
-  // LINE アカウント自体の作成・変更・削除は owner 専用だが、限定スタッフには
-  // 参照以外を一切許さない。owner ガードより手前で明示的に落とす。
+  // LINE アカウント自体の作成・変更・削除は許さない。一覧の参照だけ通す
+  // (中身は line-accounts ルート側で担当分に絞り込む)。
   if (path.startsWith('/api/line-accounts')) {
+    if (method === 'GET' && path === '/api/line-accounts') return null;
     return c.json(
       { success: false, error: 'このログインではLINEアカウントの管理はできません' },
       403,
     );
   }
 
+  // 1. アカウントを明示している場合
   const requested = requestedAccountId(c);
-  if (!requested) {
-    return c.json(
-      {
-        success: false,
-        error:
-          'アカウントを指定してください。このログインは担当のLINEアカウント専用です',
-      },
-      403,
-    );
+  if (requested) {
+    if (requested !== staff.lineAccountId) {
+      return c.json(
+        { success: false, error: 'このLINEアカウントへのアクセス権がありません' },
+        403,
+      );
+    }
+    return null;
   }
-  if (requested !== staff.lineAccountId) {
-    return c.json(
-      { success: false, error: 'このLINEアカウントへのアクセス権がありません' },
-      403,
-    );
+
+  // 2. ID で個別データを指している場合は、所属アカウントを引いて照合する
+  for (const rule of OWNERSHIP_RULES) {
+    const m = path.match(rule.re);
+    if (!m) continue;
+    const row = await c.env.DB.prepare(rule.sql)
+      .bind(m[1])
+      .first<{ account: string | null }>();
+    if (!row) {
+      // 存在しないIDと、担当外のIDを区別しない。存在有無を漏らさないため。
+      return c.json({ success: false, error: 'データが見つかりません' }, 404);
+    }
+    if (row.account !== staff.lineAccountId) {
+      return c.json(
+        { success: false, error: 'このデータへのアクセス権がありません' },
+        403,
+      );
+    }
+    return null;
   }
-  return null;
+
+  // 3. アカウントに紐づかない共通データ
+  if (ACCOUNT_AGNOSTIC.some((re) => re.test(path))) return null;
+
+  // 4. それ以外は通さない
+  return c.json(
+    {
+      success: false,
+      error: 'アカウントを指定してください。このログインは担当のLINEアカウント専用です',
+    },
+    403,
+  );
 }
 
 export async function authMiddleware(c: Context<Env>, next: Next): Promise<Response | void> {
@@ -320,7 +389,7 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
   c.set('staff', staff);
 
   // 担当アカウントが限定されているスタッフは、ここで範囲外を遮断する。
-  const scopeDenied = enforceAccountScope(c);
+  const scopeDenied = await enforceAccountScope(c);
   if (scopeDenied) return scopeDenied;
 
   return next();
