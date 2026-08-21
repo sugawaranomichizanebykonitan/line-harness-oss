@@ -12,6 +12,32 @@ type WahmsAccount = {
 
 const SURVEY_LIFF_URL = 'https://liff.line.me/2010052458-oPl4GiQQ';
 
+const TEST_RECIPIENT_PATTERN = /^U[0-9a-f]{32}$/i;
+
+/**
+ * 「テスト送信のつもりが全員配信」事故を止めるための共通判定。
+ *
+ * - IDを渡したのに形式が不正なら、全員配信へフォールバックせず必ず失敗させる。
+ * - IDを渡していない＝一斉配信なので、呼び出し側の明示的な同意 (confirmBroadcast)
+ *   が無い限り送信しない。画面のconfirmだけに頼らず、APIを直接叩かれても守る。
+ */
+function resolveDeliveryScope(body: { testRecipientId?: string; confirmBroadcast?: boolean }):
+  | { mode: 'test'; recipientId: string }
+  | { mode: 'broadcast' }
+  | { mode: 'invalid'; message: string } {
+  const raw = body.testRecipientId?.trim();
+  if (raw) {
+    if (!TEST_RECIPIENT_PATTERN.test(raw)) {
+      return { mode: 'invalid', message: 'テスト送信先のLINE IDの形式が正しくありません。安全のため、一斉配信には切り替えず送信を中止しました' };
+    }
+    return { mode: 'test', recipientId: raw };
+  }
+  if (body.confirmBroadcast !== true) {
+    return { mode: 'invalid', message: '一斉配信するには確認が必要です。テスト送信の場合はテスト用LINE IDを入力してください' };
+  }
+  return { mode: 'broadcast' };
+}
+
 function bearerToken(header: string | undefined): string | null {
   return header?.startsWith('Bearer ') ? header.slice(7) : null;
 }
@@ -176,15 +202,17 @@ wahms.post('/api/wahms/surveys/:id/reply', async (c) => {
 wahms.post('/api/wahms/survey-deliveries', async (c) => {
   const scope = await requireWahmsAccount(c);
   if ('error' in scope) return scope.error;
-  const body = await c.req.json<{ schoolName?: string; eventDate?: string; testRecipientId?: string }>();
+  const body = await c.req.json<{ schoolName?: string; eventDate?: string; testRecipientId?: string; confirmBroadcast?: boolean }>();
+  const scopeMode = resolveDeliveryScope(body);
+  if (scopeMode.mode === 'invalid') return c.json({ success: false, error: scopeMode.message }, 400);
   const schoolName = body.schoolName?.trim();
   const eventDate = normalizeDate(body.eventDate || '');
   if (!schoolName || !eventDate) return c.json({ success: false, error: '学校と開催日を選択してください' }, 400);
   const targets = await c.env.DB.prepare(
     `SELECT DISTINCT line_user_id FROM wahms_applications WHERE line_account_id = ? AND school_name = ? AND REPLACE(SUBSTR(event_date, 1, 10), '/', '-') = ?`,
   ).bind(scope.account.id, schoolName, eventDate).all<{ line_user_id: string }>();
-  const ids = body.testRecipientId?.match(/^U[0-9a-f]{32}$/i)
-    ? [body.testRecipientId]
+  const ids = scopeMode.mode === 'test'
+    ? [scopeMode.recipientId]
     : (targets.results || []).map((row) => row.line_user_id).filter(Boolean);
   if (!ids.length) return c.json({ success: false, error: 'この講義の申込者が見つかりません' }, 400);
 
@@ -205,16 +233,18 @@ wahms.post('/api/wahms/survey-deliveries', async (c) => {
 wahms.post('/api/wahms/flex-deliveries', async (c) => {
   const scope = await requireWahmsAccount(c);
   if ('error' in scope) return scope.error;
-  const body = await c.req.json<{ altText?: string; contents?: unknown; testRecipientId?: string }>();
+  const body = await c.req.json<{ altText?: string; contents?: unknown; testRecipientId?: string; confirmBroadcast?: boolean }>();
   if (!body.altText?.trim() || !body.contents || typeof body.contents !== 'object') {
     return c.json({ success: false, error: '代替テキストとFlex JSONを入力してください' }, 400);
   }
+  const scopeMode = resolveDeliveryScope(body);
+  if (scopeMode.mode === 'invalid') return c.json({ success: false, error: scopeMode.message }, 400);
   // Flex Simulatorの「contents」だけでなく、LINE Messaging API用の
   // { type: 'flex', altText, contents } 全体を貼り付けても配信できる。
   const candidate = body.contents as { type?: string; altText?: string; contents?: unknown };
   const flexContents = candidate.type === 'flex' && candidate.contents ? candidate.contents : body.contents;
   const altText = candidate.type === 'flex' && candidate.altText ? candidate.altText : body.altText.trim();
-  const testRecipientId = body.testRecipientId?.match(/^U[0-9a-f]{32}$/i) ? body.testRecipientId : null;
+  const testRecipientId = scopeMode.mode === 'test' ? scopeMode.recipientId : null;
   const response = await proxySend(c, scope.account.id, testRecipientId ? 'push' : 'broadcast', testRecipientId ? {
     to: testRecipientId,
     messages: [{ type: 'flex', altText, contents: flexContents }],

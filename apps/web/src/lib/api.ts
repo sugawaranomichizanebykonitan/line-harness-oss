@@ -2211,13 +2211,15 @@ export const wahmsApi = {
     fetchApi<ApiResponse<{ id: string; status: string }>>(`/api/wahms/surveys/${surveyId}/reply?accountId=${encodeURIComponent(accountId)}`, {
       method: 'POST', body: JSON.stringify({ answer }),
     }),
+  // testRecipientId を渡さない＝一斉配信。Worker側が confirmBroadcast を必須にしているため、
+  // 一斉配信のときだけ明示的に true を送る。誤って全員へ飛ぶ経路を作らないこと。
   sendSurvey: (accountId: string, schoolName: string, eventDate: string, testRecipientId?: string) =>
     fetchApi<ApiResponse<{ targetCount: number; success: number; failure: number }>>(`/api/wahms/survey-deliveries?accountId=${encodeURIComponent(accountId)}`, {
-      method: 'POST', body: JSON.stringify({ schoolName, eventDate, testRecipientId }),
+      method: 'POST', body: JSON.stringify({ schoolName, eventDate, testRecipientId, confirmBroadcast: !testRecipientId }),
     }),
   sendFlex: (accountId: string, altText: string, contents: unknown, testRecipientId?: string) =>
     fetchApi<ApiResponse<{ sent: boolean }>>(`/api/wahms/flex-deliveries?accountId=${encodeURIComponent(accountId)}`, {
-      method: 'POST', body: JSON.stringify({ altText, contents, testRecipientId }),
+      method: 'POST', body: JSON.stringify({ altText, contents, testRecipientId, confirmBroadcast: !testRecipientId }),
     }),
   createArchive: (accountId: string, data: { schoolName: string; lectureNumber?: string; theme?: string; heldOn?: string; youtubeUrl?: string }) =>
     fetchApi<ApiResponse<{ id: string }>>(`/api/wahms/archives?accountId=${encodeURIComponent(accountId)}`, {
