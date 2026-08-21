@@ -148,7 +148,13 @@ export type Env = {
     GOOGLE_OAUTH_CLIENT_SECRET?: string;
   };
   Variables: {
-    staff: { id: string; name: string; role: 'owner' | 'admin' | 'staff' };
+    staff: {
+      id: string;
+      name: string;
+      role: 'owner' | 'admin' | 'staff';
+      /** 担当LINEアカウント。null は全アカウント。 */
+      lineAccountId: string | null;
+    };
   };
 };
 

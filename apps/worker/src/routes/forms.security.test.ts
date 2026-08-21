@@ -88,7 +88,7 @@ function app(asAdmin = false) {
   const a = new Hono<Env>();
   if (asAdmin) {
     a.use('/api/forms/*', async (c, next) => {
-      c.set('staff', { id: 'owner-1', name: 'Owner', role: 'owner' });
+      c.set('staff', { id: 'owner-1', name: 'Owner', role: 'owner', lineAccountId: null });
       return next();
     });
   }
