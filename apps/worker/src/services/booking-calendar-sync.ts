@@ -85,13 +85,14 @@ export async function syncConfirmedBookingToGoogle(
     .prepare(
       `SELECT b.id, b.starts_at, b.ends_at, b.customer_note, b.external_event_id,
               f.display_name AS friend_name, m.name AS menu_name,
-              s.display_name AS staff_name,
+              s.display_name AS staff_name, la.name AS account_name,
               gc.id AS connection_id, gc.calendar_id, gc.auth_type,
               gc.access_token, gc.refresh_token
          FROM bookings b
          INNER JOIN friends f ON f.id = b.friend_id
          INNER JOIN menus m ON m.id = b.menu_id
          INNER JOIN staff s ON s.id = b.staff_id
+         INNER JOIN line_accounts la ON la.id = b.line_account_id
          LEFT JOIN google_calendar_connections gc
            ON gc.line_account_id = b.line_account_id
           AND gc.staff_id = b.staff_id
@@ -108,6 +109,7 @@ export async function syncConfirmedBookingToGoogle(
       friend_name: string | null;
       menu_name: string;
       staff_name: string;
+      account_name: string;
       connection_id: string | null;
       calendar_id: string | null;
       auth_type: string | null;
@@ -133,7 +135,7 @@ export async function syncConfirmedBookingToGoogle(
     start: row.starts_at,
     end: row.ends_at,
     description: [
-      `株式会社Frei キャリアコンサル管理（担当: ${row.staff_name}）`,
+      `${row.account_name} 公式LINE管理（担当: ${row.staff_name}）`,
       `予約ID: ${row.id}`,
       row.customer_note ? `メモ: ${row.customer_note}` : '',
     ].filter(Boolean).join('\n'),

@@ -3,8 +3,8 @@ import './globals.css'
 import AppShell from '@/components/app-shell'
 
 export const metadata: Metadata = {
-  title: '株式会社Frei キャリアコンサル管理',
-  description: '株式会社Frei キャリアコンサル管理画面',
+  title: '公式LINE 統合管理',
+  description: '複数の公式LINEアカウントをまとめて管理する画面',
 }
 
 export default function RootLayout({

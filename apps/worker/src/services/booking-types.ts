@@ -27,6 +27,7 @@ export interface MenuRow {
   description: string | null;
   duration_minutes: number;
   buffer_after_minutes: number;
+  auto_confirm: number;
   base_price: number;
   sort_order: number;
   is_active: number;

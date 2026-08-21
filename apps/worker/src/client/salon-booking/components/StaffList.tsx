@@ -68,8 +68,8 @@ export default function StaffList({
     <div className="space-y-5 sb-fade-in">
       <BackButton onBack={onBack} />
       <div>
-        <h1 className="text-base font-bold text-gray-900">担当を選んでください</h1>
-        <p className="text-xs text-gray-500 mt-1">step 2 / 4</p>
+        <h1 className="text-base font-bold text-gray-900">相談する担当者を選んでください</h1>
+        <p className="text-xs text-gray-500 mt-1">担当者ごとの空き時間を確認できます</p>
       </div>
       <ul className="space-y-2">
         {list.map((s) => (
@@ -106,7 +106,7 @@ export default function StaffList({
               </div>
               <div className="text-right shrink-0">
                 <div className="text-sm font-semibold sb-line-green-text tabular-nums">
-                  ¥{s.price.toLocaleString()}
+                  {s.price === 0 ? '無料' : `¥${s.price.toLocaleString()}`}
                 </div>
                 {s.price !== basePrice && <div className="text-xs text-gray-300">〜</div>}
               </div>

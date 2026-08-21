@@ -316,6 +316,30 @@ describe('getAvailability', () => {
     }
   });
 
+  test('Googleカレンダー予定の前後にメニューバッファを確保する', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      calendars: { 'cal@example.com': { busy: [{ start: '2026-05-09T02:00:00Z', end: '2026-05-09T03:00:00Z' }] } },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    try {
+      const db = stubDB({
+        menu: { duration_minutes: 60, buffer_after_minutes: 30, override_duration: null, override_price: null },
+        staff: [{ id: 'S1', display_name: '山田', is_designation_optional: 0 }],
+        shifts: [{ staff_id: 'S1', work_date: '2026-05-09', start_time: '08:00', end_time: '14:00' }],
+        bookings: [],
+        calendarConnection: { id: 'GC1', calendar_id: 'cal@example.com', auth_type: 'oauth', access_token: 'token' },
+      });
+      const result = await getAvailability(db, {
+        lineAccountId: 'A1', menuId: 'M1', from: '2026-05-09', to: '2026-05-09',
+        now: new Date('2026-05-08T00:00:00Z'), minLeadTimeMinutes: 0,
+      });
+      expect(result.by_staff[0].slots.map((slot) => slot.start)).toEqual([
+        '08:00', '08:30', '09:00', '09:30', '12:30',
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   test('staff_id 指定 → そのスタッフのみ', async () => {
     const db = stubDB({
       menu: {

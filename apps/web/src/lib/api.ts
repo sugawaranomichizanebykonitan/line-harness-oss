@@ -1653,6 +1653,7 @@ export interface BookingMenu {
   description: string | null;
   duration_minutes: number;
   buffer_after_minutes: number;
+  auto_confirm: number;
   base_price: number;
   sort_order: number;
   is_active: number;
@@ -1739,6 +1740,14 @@ export const bookingApi = {
   deleteMenu: (accountId: string, id: string) =>
     fetchApi<{ ok: true }>(withAccount(`/api/booking/admin/menus/${id}`, accountId), {
       method: 'DELETE',
+    }),
+  createCareerConsultingPreset: (accountId: string) =>
+    fetchApi<{
+      menu_id: string;
+      staff_id: string;
+      created: boolean;
+    }>(withAccount('/api/booking/admin/presets/career-consulting', accountId), {
+      method: 'POST',
     }),
   // Staff
   listStaff: (accountId: string) =>
@@ -2171,4 +2180,51 @@ export const webinarApi = {
   analytics: (id: string) => fetchApi<{ data: WebinarAnalytics }>(`/api/webinars/${id}/analytics`),
   userComments: (id: string) =>
     fetchApi<{ data: WebinarUserComment[] }>(`/api/webinars/${id}/user-comments`),
+}
+
+export type WahmsOverview = {
+  account: { id: string; name: string; channel_id: string }
+  summary: {
+    participants: number
+    applications: number
+    surveyResponses: number
+    averageSatisfaction: number | null
+    unbelievableRate: number
+    pendingQuestions: number
+  }
+  schools: Array<{ school_name: string; latest_date: string | null; application_count: number }>
+  participants: Array<Record<string, unknown> & { id: string; name?: string; line_display_name?: string; occupation?: string; status?: string; booking_count?: number }>
+  applications: Array<Record<string, unknown> & { id: string; participant_name?: string; school_name: string; event_date?: string; event_time?: string; theme?: string; attended?: number | null }>
+  surveys: Array<Record<string, unknown> & { id: string; responded_at?: string; school_name: string; satisfaction?: number; value_rating?: string; next_intent?: string; question?: string; answer?: string; respondent_name?: string; response_status: 'none' | 'pending' | 'completed' }>
+  archives: Array<Record<string, unknown> & { id: string; school_name: string; lecture_number?: string; theme?: string; held_on?: string; youtube_url?: string }>
+  deliveryLogs: Array<Record<string, unknown> & { id: string; delivery_type: string; title: string; success_count: number; failure_count: number; created_at: string }>
+}
+
+export const wahmsApi = {
+  overview: (accountId: string, params?: { school?: string; search?: string }) => {
+    const query = new URLSearchParams({ accountId })
+    if (params?.school) query.set('school', params.school)
+    if (params?.search) query.set('search', params.search)
+    return fetchApi<ApiResponse<WahmsOverview>>(`/api/wahms/overview?${query}`)
+  },
+  reply: (accountId: string, surveyId: string, answer: string) =>
+    fetchApi<ApiResponse<{ id: string; status: string }>>(`/api/wahms/surveys/${surveyId}/reply?accountId=${encodeURIComponent(accountId)}`, {
+      method: 'POST', body: JSON.stringify({ answer }),
+    }),
+  // testRecipientId を渡さない＝一斉配信。Worker側が confirmBroadcast を必須にしているため、
+  // 一斉配信のときだけ明示的に true を送る。誤って全員へ飛ぶ経路を作らないこと。
+  sendSurvey: (accountId: string, schoolName: string, eventDate: string, testRecipientId?: string) =>
+    fetchApi<ApiResponse<{ targetCount: number; success: number; failure: number }>>(`/api/wahms/survey-deliveries?accountId=${encodeURIComponent(accountId)}`, {
+      method: 'POST', body: JSON.stringify({ schoolName, eventDate, testRecipientId, confirmBroadcast: !testRecipientId }),
+    }),
+  sendFlex: (accountId: string, altText: string, contents: unknown, testRecipientId?: string) =>
+    fetchApi<ApiResponse<{ sent: boolean }>>(`/api/wahms/flex-deliveries?accountId=${encodeURIComponent(accountId)}`, {
+      method: 'POST', body: JSON.stringify({ altText, contents, testRecipientId, confirmBroadcast: !testRecipientId }),
+    }),
+  createArchive: (accountId: string, data: { schoolName: string; lectureNumber?: string; theme?: string; heldOn?: string; youtubeUrl?: string }) =>
+    fetchApi<ApiResponse<{ id: string }>>(`/api/wahms/archives?accountId=${encodeURIComponent(accountId)}`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+  deleteArchive: (accountId: string, id: string) =>
+    fetchApi<ApiResponse<null>>(`/api/wahms/archives/${id}?accountId=${encodeURIComponent(accountId)}`, { method: 'DELETE' }),
 }

@@ -30,7 +30,11 @@ function App({ ctx }: { ctx: SalonBookingContext }) {
   // mount 時点の値だけ Booking に渡す。
   const [initialMenuId] = useState(initial.menuId);
 
-  const headerLabel = view === 'history' ? '予約履歴' : peekMode ? '空き状況' : 'ご予約';
+  const headerLabel = view === 'history'
+    ? '個別相談の予約履歴'
+    : peekMode
+      ? '無料個別相談の空き状況'
+      : '無料キャリア個別相談';
 
   return (
     <SalonBookingProvider value={ctx}>

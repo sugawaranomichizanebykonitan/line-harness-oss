@@ -13,6 +13,7 @@ const EMPTY: Partial<BookingMenu> = {
   description: '',
   duration_minutes: 60,
   buffer_after_minutes: 0,
+  auto_confirm: 0,
   base_price: 5000,
   sort_order: 0,
   is_active: 1,
@@ -29,6 +30,7 @@ export default function MenusPage() {
   // 直近にコピーした行だけ「コピー済」が出る。
   const [copiedMenuId, setCopiedMenuId] = useState<string | null>(null)
   const [tags, setTags] = useState<Tag[]>([])
+  const [creatingPreset, setCreatingPreset] = useState(false)
 
   const liffId = selectedAccount?.liffId ?? null
   const workerBase = process.env.NEXT_PUBLIC_API_URL ?? ''
@@ -44,6 +46,33 @@ export default function MenusPage() {
       }, 2000)
     } catch {
       window.prompt('コピーしてください:', url)
+    }
+  }
+
+  function menuUrl(menuId: string) {
+    if (!workerBase || !liffId) return ''
+    return `${workerBase}/o?liffId=${encodeURIComponent(liffId)}&page=salon-book&menu_id=${encodeURIComponent(menuId)}`
+  }
+
+  async function copyText(value: string, fallbackLabel: string) {
+    try {
+      await navigator.clipboard.writeText(value)
+    } catch {
+      window.prompt(`${fallbackLabel}をコピーしてください:`, value)
+    }
+  }
+
+  async function createPreset() {
+    if (!selectedAccountId) return
+    setCreatingPreset(true)
+    setError(null)
+    try {
+      await bookingApi.createCareerConsultingPreset(selectedAccountId)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCreatingPreset(false)
     }
   }
 
@@ -106,7 +135,14 @@ export default function MenusPage() {
       <Header
         title="メニュー"
         description="予約メニューの登録・編集"
-        action={
+        action={<div className="flex flex-wrap gap-2">
+          <button
+            onClick={createPreset}
+            disabled={!selectedAccountId || creatingPreset}
+            className="rounded-lg border border-green-600 bg-white px-4 py-2 text-sm font-medium text-green-700 disabled:opacity-50"
+          >
+            {creatingPreset ? '作成中…' : '無料相談セットを作成'}
+          </button>
           <button
             onClick={() => setEditing(EMPTY)}
             disabled={!selectedAccountId}
@@ -115,7 +151,7 @@ export default function MenusPage() {
           >
             + 新規メニュー
           </button>
-        }
+        </div>}
       />
 
       {error && (
@@ -193,14 +229,47 @@ export default function MenusPage() {
                           // 有効化されるまでコピー不可にする。
                           <span className="text-gray-300" title="メニューを有効化するとコピーできます">専用URL</span>
                         ) : (
-                          <button
-                            type="button"
-                            onClick={() => copyMenuUrl(m.id)}
-                            className="text-blue-600 hover:underline"
-                            title={`${workerBase}/o?liffId=${encodeURIComponent(liffId)}&page=salon-book&menu_id=${encodeURIComponent(m.id)}`}
-                          >
-                            {copiedMenuId === m.id ? '✓ コピー済' : '専用URL'}
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => copyMenuUrl(m.id)}
+                              className="text-blue-600 hover:underline"
+                              title={menuUrl(m.id)}
+                            >
+                              {copiedMenuId === m.id ? '✓ コピー済' : '専用URL'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => copyText(JSON.stringify({
+                                type: 'uri',
+                                label: 'キャリアコンサルティング',
+                                uri: menuUrl(m.id),
+                              }, null, 2), 'リッチメニューアクション')}
+                              className="text-blue-600 hover:underline"
+                            >
+                              リッチメニュー用
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => copyText(JSON.stringify({
+                                type: 'flex',
+                                altText: m.name,
+                                contents: {
+                                  type: 'bubble',
+                                  body: { type: 'box', layout: 'vertical', contents: [
+                                    { type: 'text', text: m.name, weight: 'bold', size: 'lg', wrap: true },
+                                    { type: 'text', text: m.description || '日時を選んで無料相談を予約できます。', size: 'sm', color: '#666666', margin: 'md', wrap: true },
+                                  ] },
+                                  footer: { type: 'box', layout: 'vertical', contents: [
+                                    { type: 'button', style: 'primary', color: '#06C755', action: { type: 'uri', label: '日程を選ぶ', uri: menuUrl(m.id) } },
+                                  ] },
+                                },
+                              }, null, 2), 'カード配信用Flex JSON')}
+                              className="text-blue-600 hover:underline"
+                            >
+                              カード用
+                            </button>
+                          </>
                         )}
                         <button onClick={() => remove(m.id)} className="text-red-600 hover:underline">削除</button>
                       </div>
@@ -307,6 +376,18 @@ function Modal({
               onChange={(v) => set('sort_order', v)}
             />
           </div>
+          <label className="flex items-start gap-3 rounded-lg border border-green-200 bg-green-50 p-3">
+            <input
+              type="checkbox"
+              checked={Boolean(form.auto_confirm)}
+              onChange={(e) => set('auto_confirm', e.target.checked ? 1 : 0)}
+              className="mt-0.5 h-4 w-4"
+            />
+            <span>
+              <span className="block text-sm font-medium text-green-900">選択と同時に予約を確定し、Google Meetを発行</span>
+              <span className="mt-1 block text-xs text-green-800">Googleカレンダー接続が必須です。前日と開始1時間前にLINEでMeet URLを送ります。</span>
+            </span>
+          </label>
           <Field label="予約申込時に自動付与するタグ">
             <select
               value={form.auto_tag_id ?? ''}

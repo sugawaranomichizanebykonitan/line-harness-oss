@@ -12,7 +12,7 @@ export default function Confirm({
   menu: MenuItem;
   staff: StaffItem;
   slot: { date: string; start: string };
-  onSubmitted: () => void;
+  onSubmitted: (status: string) => void;
   onBack: () => void;
 }) {
   const [note, setNote] = useState('');
@@ -24,7 +24,7 @@ export default function Confirm({
     setSubmitting(true);
     setError(null);
     try {
-      await api.createRequest(
+      const result = await api.createRequest(
         {
           menu_id: menu.id,
           staff_id: staff.id,
@@ -33,13 +33,15 @@ export default function Confirm({
         },
         idemKey,
       );
-      onSubmitted();
+      onSubmitted(result.status);
     } catch (e) {
       const err = e as { status?: number; body?: { error?: string } };
       if (err.status === 409 && err.body?.error === 'slot_conflict') {
         setError('この時間枠は他の方の予約と重なりました。日時を選び直してください。');
       } else {
-        setError('予約リクエストの送信に失敗しました。時間をおいて再度お試しください。');
+        setError(err.status === 503
+          ? 'Googleカレンダーとの連携を確認できませんでした。時間をおいて再度お試しください。'
+          : '予約の送信に失敗しました。時間をおいて再度お試しください。');
       }
     } finally {
       setSubmitting(false);
@@ -64,7 +66,7 @@ export default function Confirm({
           onChange={(e) => setNote(e.target.value)}
           className="mt-1 w-full border rounded p-2 text-sm"
           rows={3}
-          placeholder="髪型の希望、アレルギー、その他"
+          placeholder="相談したい内容やご要望があればご記入ください"
         />
       </label>
       {error && <p className="text-red-600 text-sm">{error}</p>}
@@ -73,7 +75,7 @@ export default function Confirm({
         disabled={submitting}
         className="w-full bg-green-600 text-white py-3 rounded font-semibold disabled:opacity-50"
       >
-        {submitting ? '送信中...' : '予約をリクエスト'}
+        {submitting ? '予約中...' : menu.auto_confirm ? 'この日時で予約を確定' : '予約をリクエスト'}
       </button>
     </div>
   );

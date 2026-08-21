@@ -10,8 +10,8 @@ import { createApi, type MenuItem, type StaffItem } from '../lib/api.js';
 type Step = 'menu' | 'staff' | 'datetime' | 'confirm' | 'done';
 
 const STEPS: Array<{ key: Step; label: string }> = [
-  { key: 'menu', label: 'メニュー' },
-  { key: 'staff', label: '担当' },
+  { key: 'menu', label: '相談内容' },
+  { key: 'staff', label: '担当者' },
   { key: 'datetime', label: '日時' },
   { key: 'confirm', label: '確認' },
 ];
@@ -30,6 +30,7 @@ export default function Booking({
   const [menu, setMenu] = useState<MenuItem | null>(null);
   const [staff, setStaff] = useState<StaffItem | null>(null);
   const [slot, setSlot] = useState<{ date: string; start: string } | null>(null);
+  const [bookingStatus, setBookingStatus] = useState('requested');
   // ?menu_id=... が指定されたら、メニュー一覧をスキップして staff から開始。
   // 該当 menu が無効/未公開だった場合は通常フローに fallback（黙って全
   // メニュー一覧を出す方が「初回オリエン直リンク経由なのに別メニュー
@@ -41,11 +42,14 @@ export default function Booking({
     let cancelled = false;
     createApi(ctx)
       .menus()
-      .then((res) => {
+      .then(async (res) => {
         if (cancelled) return;
         const hit = res.menus.find((m) => m.id === initialMenuId);
         if (hit) {
           setMenu(hit);
+          // 専用リンクから開いた場合も、担当者は利用者自身に選んでもらう。
+          // 1名だけの時点でも選択画面を省略しないことで、将来スタッフが
+          // 増えた場合と同じ導線を保ち、誰の予定に入るかを明確にする。
           setStep('staff');
         }
       })
@@ -172,7 +176,7 @@ export default function Booking({
           ctaLabel={
             peekMode
               ? '空き状況の確認モードです（タップで予約に進めます）'
-              : 'step 3 / 4'
+              : '空いている日時だけを表示しています'
           }
           selected={slot}
           onSelect={(picked) => {
@@ -206,11 +210,14 @@ export default function Booking({
           menu={menu}
           staff={staff}
           slot={slot}
-          onSubmitted={() => setStep('done')}
+          onSubmitted={(status) => {
+            setBookingStatus(status);
+            setStep('done');
+          }}
           onBack={() => setStep('datetime')}
         />
       )}
-      {step === 'done' && <Done />}
+      {step === 'done' && <Done confirmed={bookingStatus === 'confirmed'} />}
     </div>
   );
 }
