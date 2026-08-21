@@ -897,6 +897,8 @@ CREATE TABLE IF NOT EXISTS staff_members (
   role       TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'staff')),
   api_key    TEXT UNIQUE NOT NULL,
   is_active  INTEGER NOT NULL DEFAULT 1,
+  -- NULL = 全アカウント。値が入ると、そのLINEアカウント専用のスタッフになる。
+  line_account_id TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );

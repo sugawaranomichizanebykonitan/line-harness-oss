@@ -88,6 +88,12 @@ export type AuthenticatedStaff = {
   id: string;
   name: string;
   role: 'owner' | 'admin' | 'staff';
+  /**
+   * 担当できる LINE 公式アカウント。null は従来どおり全アカウント。
+   * 値が入っているスタッフは、そのアカウント以外のデータへ一切到達できない
+   * (enforceAccountScope で遮断する)。
+   */
+  lineAccountId: string | null;
 };
 
 /**
@@ -103,12 +109,17 @@ export async function authenticateApiToken(
 
   const staff = await getStaffByApiKey(c.env.DB, token);
   if (staff) {
-    return { id: staff.id, name: staff.name, role: staff.role };
+    return {
+      id: staff.id,
+      name: staff.name,
+      role: staff.role,
+      lineAccountId: staff.line_account_id ?? null,
+    };
   }
 
   // Fallback: env API_KEY acts as owner (current rotation slot)
   if (token === c.env.API_KEY) {
-    return { id: 'env-owner', name: 'Owner', role: 'owner' };
+    return { id: 'env-owner', name: 'Owner', role: 'owner', lineAccountId: null };
   }
 
   // Legacy fallback: LEGACY_API_KEY accepted during rotation grace period.
@@ -122,9 +133,79 @@ export async function authenticateApiToken(
     token === c.env.LEGACY_API_KEY
   ) {
     console.log('[auth] accept_via=LEGACY_API_KEY');
-    return { id: 'env-owner', name: 'Owner', role: 'owner' };
+    return { id: 'env-owner', name: 'Owner', role: 'owner', lineAccountId: null };
   }
 
+  return null;
+}
+
+/**
+ * アカウント限定スタッフでも通してよいパス。ログイン状態の確認と、
+ * 自分が担当するアカウントを知るための一覧取得だけ。
+ * 一覧の中身は /api/line-accounts 側でスタッフのスコープに絞り込む。
+ */
+const ACCOUNT_SCOPE_ALLOWED_GET = new Set([
+  '/api/auth/session',
+  '/api/line-accounts',
+  '/api/capabilities',
+]);
+
+/** リクエストが対象にしている LINE アカウントを取り出す。 */
+function requestedAccountId(c: Context<Env>): string | null {
+  const url = new URL(c.req.url);
+  return (
+    url.searchParams.get('accountId') ||
+    url.searchParams.get('lineAccountId') ||
+    c.req.header('X-Line-Account-Id') ||
+    null
+  );
+}
+
+/**
+ * アカウント限定スタッフのアクセス制御。fail-closed。
+ *
+ * 42 ファイルに散らばる accountId 受け取り箇所を個別に直すのは漏れが出るので、
+ * 「対象アカウントを明示していないリクエストは通さない」方針で一括して塞ぐ。
+ * 明示していても自分の担当と違えば 403。
+ *
+ * 戻り値が Response ならそこで打ち切る。null なら通してよい。
+ */
+export function enforceAccountScope(c: Context<Env>): Response | null {
+  const staff = c.get('staff') as AuthenticatedStaff | undefined;
+  if (!staff?.lineAccountId) return null; // 全アカウント権限
+
+  const path = new URL(c.req.url).pathname;
+  const method = c.req.method.toUpperCase();
+
+  if (path === '/api/auth/logout') return null;
+  if (method === 'GET' && ACCOUNT_SCOPE_ALLOWED_GET.has(path)) return null;
+
+  // LINE アカウント自体の作成・変更・削除は owner 専用だが、限定スタッフには
+  // 参照以外を一切許さない。owner ガードより手前で明示的に落とす。
+  if (path.startsWith('/api/line-accounts')) {
+    return c.json(
+      { success: false, error: 'このログインではLINEアカウントの管理はできません' },
+      403,
+    );
+  }
+
+  const requested = requestedAccountId(c);
+  if (!requested) {
+    return c.json(
+      {
+        success: false,
+        error:
+          'アカウントを指定してください。このログインは担当のLINEアカウント専用です',
+      },
+      403,
+    );
+  }
+  if (requested !== staff.lineAccountId) {
+    return c.json(
+      { success: false, error: 'このLINEアカウントへのアクセス権がありません' },
+      403,
+    );
+  }
   return null;
 }
 
@@ -237,5 +318,10 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
   }
 
   c.set('staff', staff);
+
+  // 担当アカウントが限定されているスタッフは、ここで範囲外を遮断する。
+  const scopeDenied = enforceAccountScope(c);
+  if (scopeDenied) return scopeDenied;
+
   return next();
 }

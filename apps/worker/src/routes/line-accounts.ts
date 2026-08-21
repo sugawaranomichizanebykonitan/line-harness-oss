@@ -74,7 +74,12 @@ async function fetchBotProfile(accessToken: string): Promise<{ displayName?: str
 lineAccounts.get('/api/line-accounts', async (c) => {
   try {
     const db = c.env.DB;
-    const items = await getLineAccounts(db);
+    const all = await getLineAccounts(db);
+
+    // 担当アカウントが限定されたスタッフには、そのアカウントだけを返す。
+    // 管理画面のアカウント切替に他社の名前すら出さないための絞り込み。
+    const scope = c.get('staff')?.lineAccountId ?? null;
+    const items = scope ? all.filter((a) => a.id === scope) : all;
 
     // Get stats for all accounts in parallel
     const results = await Promise.all(

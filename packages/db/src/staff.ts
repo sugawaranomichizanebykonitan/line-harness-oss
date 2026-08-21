@@ -7,6 +7,8 @@ export interface StaffMember {
   role: 'owner' | 'admin' | 'staff';
   api_key: string;
   is_active: number;
+  /** NULL = 全アカウント。値が入ると、そのLINEアカウント専用のスタッフになる。 */
+  line_account_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -15,6 +17,8 @@ export interface CreateStaffInput {
   name: string;
   email?: string | null;
   role: 'owner' | 'admin' | 'staff';
+  /** 指定するとそのLINEアカウント専用のスタッフになる。省略で全アカウント。 */
+  line_account_id?: string | null;
 }
 
 export interface UpdateStaffInput {
@@ -68,10 +72,19 @@ export async function createStaffMember(
 
   await db
     .prepare(
-      `INSERT INTO staff_members (id, name, email, role, api_key, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+      `INSERT INTO staff_members (id, name, email, role, api_key, is_active, line_account_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
     )
-    .bind(id, input.name, input.email ?? null, input.role, apiKey, now, now)
+    .bind(
+      id,
+      input.name,
+      input.email ?? null,
+      input.role,
+      apiKey,
+      input.line_account_id ?? null,
+      now,
+      now,
+    )
     .run();
 
   return (await db
