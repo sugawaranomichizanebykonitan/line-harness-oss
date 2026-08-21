@@ -148,7 +148,9 @@ wahms.get('/api/wahms/overview', async (c) => {
     c.env.DB.prepare(`SELECT p.*, (SELECT COUNT(*) FROM wahms_applications a WHERE a.line_account_id = p.line_account_id AND a.line_user_id = p.line_user_id) AS booking_count FROM wahms_participants p WHERE p.line_account_id = ? AND (? = '' OR p.name LIKE ? OR p.line_display_name LIKE ? OR p.occupation LIKE ?) ORDER BY p.updated_at DESC LIMIT 500`).bind(accountId, search, `%${search}%`, `%${search}%`, `%${search}%`).all(),
     c.env.DB.prepare(`SELECT a.*, COALESCE(p.name, p.line_display_name) AS participant_name FROM wahms_applications a LEFT JOIN wahms_participants p ON p.line_account_id = a.line_account_id AND p.line_user_id = a.line_user_id WHERE a.line_account_id = ?${schoolClause} ORDER BY a.event_date DESC, a.applied_at DESC LIMIT 1000`).bind(...schoolArgs).all(),
     c.env.DB.prepare(`SELECT s.* FROM wahms_survey_responses s WHERE s.line_account_id = ?${schoolClause} ORDER BY s.responded_at DESC, s.source_row DESC LIMIT 1000`).bind(...schoolArgs).all(),
-    c.env.DB.prepare(`SELECT * FROM wahms_archives WHERE line_account_id = ?${schoolClause} ORDER BY held_on DESC, source_row DESC LIMIT 1000`).bind(...schoolArgs).all(),
+    // アーカイブは参加者管理の学校プルダウンに引きずられないよう、常に全件返す。
+    // アーカイブ画面側に独立した学校の絞り込みがあり、そちらで切り替える。
+    c.env.DB.prepare(`SELECT * FROM wahms_archives WHERE line_account_id = ? ORDER BY school_name, CAST(lecture_number AS REAL), source_row LIMIT 1000`).bind(accountId).all(),
     c.env.DB.prepare(`SELECT * FROM wahms_delivery_logs WHERE line_account_id = ? ORDER BY created_at DESC LIMIT 30`).bind(accountId).all(),
   ]);
 
@@ -261,10 +263,42 @@ wahms.post('/api/wahms/archives', async (c) => {
   const scope = await requireWahmsAccount(c);
   if ('error' in scope) return scope.error;
   const body = await c.req.json<{ schoolName?: string; lectureNumber?: string; theme?: string; heldOn?: string; youtubeUrl?: string }>();
-  if (!body.schoolName?.trim()) return c.json({ success: false, error: '学校名は必須です' }, 400);
+  const schoolName = body.schoolName?.trim();
+  if (!schoolName) return c.json({ success: false, error: '学校名は必須です' }, 400);
+
+  // 各学校の第1〜20回は移行時に枠だけ作られており、未実施の回は日付も動画も
+  // 空のまま入っている。同じ回をもう一度「追加」すると重複行になり、LINEへ
+  // 出す一覧が二重になるので、既存の枠があれば上書きする。
+  //
+  // lecture_number は移行元の都合で '13' と '13.0' が混在しうるため、
+  // 数値として比較する。
+  const lectureNumber = body.lectureNumber?.trim() || null;
+  const existing = lectureNumber
+    ? await c.env.DB.prepare(
+        `SELECT id FROM wahms_archives
+          WHERE line_account_id = ? AND school_name = ?
+            AND CAST(lecture_number AS REAL) = CAST(? AS REAL)
+          ORDER BY source_row LIMIT 1`,
+      ).bind(scope.account.id, schoolName, lectureNumber).first<{ id: string }>()
+    : null;
+
+  if (existing) {
+    // テーマは入力があるときだけ上書きする。青山塾のようにテーマなし運用の
+    // 学校で、既存のテーマを空で潰さないため。
+    await c.env.DB.prepare(
+      `UPDATE wahms_archives
+          SET theme = COALESCE(NULLIF(?, ''), theme),
+              held_on = ?,
+              youtube_url = ?,
+              updated_at = datetime('now')
+        WHERE id = ? AND line_account_id = ?`,
+    ).bind(body.theme || '', body.heldOn || null, body.youtubeUrl || null, existing.id, scope.account.id).run();
+    return c.json({ success: true, data: { id: existing.id, updated: true } });
+  }
+
   const id = crypto.randomUUID();
-  await c.env.DB.prepare(`INSERT INTO wahms_archives (id, line_account_id, school_name, lecture_number, theme, held_on, youtube_url) VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(id, scope.account.id, body.schoolName.trim(), body.lectureNumber || null, body.theme || null, body.heldOn || null, body.youtubeUrl || null).run();
-  return c.json({ success: true, data: { id } }, 201);
+  await c.env.DB.prepare(`INSERT INTO wahms_archives (id, line_account_id, school_name, lecture_number, theme, held_on, youtube_url) VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(id, scope.account.id, schoolName, lectureNumber, body.theme || null, body.heldOn || null, body.youtubeUrl || null).run();
+  return c.json({ success: true, data: { id, updated: false } }, 201);
 });
 
 wahms.delete('/api/wahms/archives/:id', async (c) => {

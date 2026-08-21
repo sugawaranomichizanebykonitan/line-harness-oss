@@ -4,6 +4,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Header from '@/components/layout/header'
 import { useAccount } from '@/contexts/account-context'
 import { wahmsApi, type WahmsOverview } from '@/lib/api'
+import { WAHMS_LECTURE_MASTER, WAHMS_SCHOOLS } from '@/lib/wahms-lectures'
+
+/** 日本時間の今日 (YYYY-MM-DD)。開催日の判定は必ずJSTで行う。 */
+function todayJst(): string {
+  return new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10)
+}
 
 type Tab = 'participants' | 'surveys' | 'archives' | 'delivery'
 
@@ -101,17 +107,138 @@ export default function WahmsPage() {
   </>
 }
 
+/**
+ * 移行時にスプレッドシートの操作説明行までアーカイブとして取り込まれている。
+ * 学校名が絵文字＋学校名の形をしていない行は講義ではないので画面に出さない。
+ */
+function isRealLecture(schoolName: string): boolean {
+  return /(学校|塾)$/.test(schoolName.trim())
+}
+
 function ArchiveTab({ data, accountId, refresh, flash, setError }: { data: WahmsOverview; accountId: string; refresh: () => Promise<void>; flash: (s: string) => void; setError: (s: string) => void }) {
-  const [form, setForm] = useState({ schoolName: '', lectureNumber: '', theme: '', heldOn: '', youtubeUrl: '' })
-  return <section><form onSubmit={async (e) => { e.preventDefault(); try { await wahmsApi.createArchive(accountId, form); setForm({ schoolName: '', lectureNumber: '', theme: '', heldOn: '', youtubeUrl: '' }); flash('アーカイブを追加しました'); await refresh() } catch { setError('アーカイブを追加できませんでした') } }} className="mb-5 grid gap-3 rounded-xl border bg-white p-4 md:grid-cols-5"><input required value={form.schoolName} onChange={(e) => setForm({ ...form, schoolName: e.target.value })} placeholder="学校名" className="rounded-lg border p-2 text-sm" /><input value={form.lectureNumber} onChange={(e) => setForm({ ...form, lectureNumber: e.target.value })} placeholder="LECTURE番号" className="rounded-lg border p-2 text-sm" /><input value={form.theme} onChange={(e) => setForm({ ...form, theme: e.target.value })} placeholder="テーマ" className="rounded-lg border p-2 text-sm" /><input type="date" value={form.heldOn} onChange={(e) => setForm({ ...form, heldOn: e.target.value })} className="rounded-lg border p-2 text-sm" /><div className="flex gap-2"><input value={form.youtubeUrl} onChange={(e) => setForm({ ...form, youtubeUrl: e.target.value })} placeholder="YouTube URL" className="min-w-0 flex-1 rounded-lg border p-2 text-sm" /><button className="rounded-lg bg-green-600 px-4 font-bold text-white">追加</button></div></form><div className="overflow-hidden rounded-xl border bg-white"><table className="w-full text-sm"><thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="p-3">学校</th><th className="p-3">回</th><th className="p-3">開催日</th><th className="p-3">テーマ</th><th className="p-3">動画</th><th /></tr></thead><tbody>{data.archives.map((a) => <tr key={a.id} className="border-t"><td className="p-3 font-medium">{a.school_name}</td><td className="p-3">{a.lecture_number || '—'}</td><td className="p-3">{dateLabel(a.held_on)}</td><td className="p-3">{a.theme || '—'}</td><td className="p-3">{a.youtube_url ? <a href={a.youtube_url} target="_blank" rel="noreferrer" className="text-blue-600 underline">開く</a> : '—'}</td><td className="p-3"><button onClick={async () => { if (!confirm('このアーカイブを削除しますか？')) return; await wahmsApi.deleteArchive(accountId, a.id); await refresh() }} className="text-xs text-red-600">削除</button></td></tr>)}</tbody></table></div></section>
+  // アーカイブ画面は参加者管理の学校プルダウンとは独立して切り替える。
+  const schools = useMemo(() => {
+    const fromData = data.archives.map((a) => a.school_name).filter(isRealLecture)
+    return Array.from(new Set([...WAHMS_SCHOOLS, ...fromData]))
+  }, [data.archives])
+
+  const [school, setSchool] = useState(() => schools[0] ?? '')
+  const [lecture, setLecture] = useState('')
+  const [heldOn, setHeldOn] = useState('')
+  const [youtubeUrl, setYoutubeUrl] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const rows = useMemo(
+    () => data.archives
+      .filter((a) => isRealLecture(a.school_name) && a.school_name === school)
+      .sort((a, b) => Number(a.lecture_number || 0) - Number(b.lecture_number || 0)),
+    [data.archives, school],
+  )
+
+  // 回の選択肢は「既にある枠」と「マスターの第11〜20回」を統合する。
+  // 既存の枠を選べば上書き、無い回を選べば新規に作られる。
+  const lectureOptions = useMemo(() => {
+    const map = new Map<number, { theme: string; done: boolean }>()
+    for (const l of WAHMS_LECTURE_MASTER[school] ?? []) map.set(l.lecture, { theme: l.theme, done: false })
+    for (const a of rows) {
+      const n = Number(a.lecture_number || 0)
+      if (!n) continue
+      const master = map.get(n)
+      map.set(n, {
+        theme: a.theme || master?.theme || '',
+        done: Boolean(a.youtube_url),
+      })
+    }
+    return Array.from(map.entries()).sort((a, b) => a[0] - b[0])
+  }, [school, rows])
+
+  // 未登録（動画がまだ無い）いちばん若い回を初期選択にする。
+  useEffect(() => {
+    const next = lectureOptions.find(([, v]) => !v.done)
+    setLecture(next ? String(next[0]) : '')
+    setHeldOn(''); setYoutubeUrl('')
+  }, [lectureOptions])
+
+  const theme = lectureOptions.find(([n]) => String(n) === lecture)?.[1].theme ?? ''
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!school || !lecture) return
+    setSaving(true)
+    try {
+      await wahmsApi.createArchive(accountId, { schoolName: school, lectureNumber: lecture, theme, heldOn, youtubeUrl })
+      flash(`${school} 第${lecture}回 を登録しました`)
+      setHeldOn(''); setYoutubeUrl('')
+      await refresh()
+    } catch { setError('アーカイブを登録できませんでした') } finally { setSaving(false) }
+  }
+
+  return <section>
+    <div className="mb-4 flex flex-wrap gap-2">
+      {schools.map((s) => <button key={s} onClick={() => setSchool(s)}
+        className={`rounded-full px-4 py-2 text-sm font-bold ${s === school ? 'bg-green-600 text-white' : 'border bg-white text-gray-600 hover:bg-gray-50'}`}>{s}</button>)}
+    </div>
+
+    <form onSubmit={submit} className="mb-5 rounded-xl border bg-white p-4">
+      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_170px_minmax(0,1fr)_auto] md:items-end">
+        <label className="text-xs font-bold text-gray-500">講義
+          <select required value={lecture} onChange={(e) => setLecture(e.target.value)} className="mt-1 w-full rounded-lg border p-2 text-sm font-normal text-gray-900">
+            <option value="">回を選択</option>
+            {lectureOptions.map(([n, v]) => <option key={n} value={String(n)}>{v.done ? '✅ ' : ''}第{n}回{v.theme ? `　${v.theme}` : ''}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-bold text-gray-500">開催日
+          <input type="date" required value={heldOn} onChange={(e) => setHeldOn(e.target.value)} className="mt-1 w-full rounded-lg border p-2 text-sm font-normal text-gray-900" />
+        </label>
+        <label className="text-xs font-bold text-gray-500">YouTube URL
+          <input required value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)} placeholder="https://youtu.be/..." className="mt-1 w-full rounded-lg border p-2 text-sm font-normal text-gray-900" />
+        </label>
+        <button disabled={saving || !lecture} className="h-[38px] rounded-lg bg-green-600 px-6 font-bold text-white disabled:bg-gray-300">{saving ? '登録中...' : '追加'}</button>
+      </div>
+      <p className="mt-3 text-xs text-gray-500">
+        {theme ? <>テーマは自動で入ります：<span className="font-bold text-gray-700">{theme}</span></> : 'この学校はテーマを設定しません。開催日とYouTube URLだけ入力してください。'}
+      </p>
+    </form>
+
+    <div className="overflow-hidden rounded-xl border bg-white">
+      <table className="w-full text-sm">
+        <thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="p-3 w-20">回</th><th className="p-3 w-32">開催日</th><th className="p-3">テーマ</th><th className="p-3 w-20">動画</th><th className="w-16" /></tr></thead>
+        <tbody>{rows.map((a) => <tr key={a.id} className={`border-t ${a.youtube_url ? '' : 'bg-gray-50/60'}`}>
+          <td className="p-3 font-medium">第{Number(a.lecture_number || 0)}回</td>
+          <td className="p-3">{a.held_on ? dateLabel(a.held_on) : <span className="text-gray-400">未定</span>}</td>
+          <td className="p-3">{a.theme || <span className="text-gray-400">—</span>}</td>
+          <td className="p-3">{a.youtube_url ? <a href={a.youtube_url} target="_blank" rel="noreferrer" className="text-blue-600 underline">開く</a> : <span className="text-gray-400">未登録</span>}</td>
+          <td className="p-3"><button onClick={async () => { if (!confirm(`第${Number(a.lecture_number || 0)}回 を削除しますか？`)) return; await wahmsApi.deleteArchive(accountId, a.id); await refresh() }} className="text-xs text-red-600">削除</button></td>
+        </tr>)}</tbody>
+      </table>
+      {rows.length === 0 && <p className="p-6 text-center text-sm text-gray-500">この学校のアーカイブはまだありません。</p>}
+    </div>
+  </section>
 }
 
 function DeliveryTab({ data, accountId, eventOptions, refresh, flash, setError }: { data: WahmsOverview; accountId: string; eventOptions: WahmsOverview['applications']; refresh: () => Promise<void>; flash: (s: string) => void; setError: (s: string) => void }) {
   const [event, setEvent] = useState('')
+
+  // 開催日順に並べ替える。申込データは開催日の新しい順で来るが、配信は
+  // 「今日の講義」を選ぶ作業なので、今日を境に近い日付から見せる。
+  const sortedEvents = useMemo(
+    () => [...eventOptions].sort((a, b) => String(b.event_date || '').localeCompare(String(a.event_date || ''))),
+    [eventOptions],
+  )
+
+  // 当日開催の講義があれば最初から選んでおく。無ければ選択なしのまま。
+  // アンケートは講義当日に送るものなので、毎回選び直す手間をなくす。
+  const today = todayJst()
+  useEffect(() => {
+    if (event) return
+    const todays = sortedEvents.find((a) => String(a.event_date || '').slice(0, 10).replace(/\//g, '-') === today)
+    if (todays) setEvent(`${todays.school_name}|${String(todays.event_date || '').slice(0, 10)}`)
+  }, [sortedEvents, today, event])
+
   const [altText, setAltText] = useState('WAHMSからのお知らせ')
   const [json, setJson] = useState('')
   const [testRecipientId, setTestRecipientId] = useState('')
   const [sending, setSending] = useState(false)
   const sendTest = async (kind: 'survey' | 'flex') => { if (!testRecipientId.match(/^U[0-9a-f]{32}$/i)) { setError('テスト用LINE ID（Uから始まる33文字）を入力してください'); return } setSending(true); try { if (kind === 'survey') { const [schoolName, eventDate] = event.split('|'); const res = await wahmsApi.sendSurvey(accountId, schoolName, eventDate, testRecipientId); if (!res.success) throw new Error(res.error) } else { const contents = JSON.parse(json); const res = await wahmsApi.sendFlex(accountId, altText, contents, testRecipientId); if (!res.success) throw new Error(res.error) } flash('テスト送信が完了しました。LINEをご確認ください'); await refresh() } catch (error) { setError(error instanceof Error ? error.message : 'テスト送信できませんでした') } finally { setSending(false) } }
-  return <section className="grid gap-5 lg:grid-cols-2"><div className="rounded-xl border bg-white p-5"><h2 className="text-lg font-bold">当日の講義アンケートを送る</h2><p className="mt-1 text-sm text-gray-500">開催日と学校を選ぶと、その講義の申込者だけに送信します。</p><select value={event} onChange={(e) => setEvent(e.target.value)} className="mt-4 w-full rounded-lg border p-3 text-sm"><option value="">講義を選択</option>{eventOptions.map((a) => <option key={a.id} value={`${a.school_name}|${String(a.event_date || '').slice(0, 10)}`}>{a.school_name}｜{dateLabel(a.event_date)}</option>)}</select><button disabled={!event || sending} onClick={async () => { const [schoolName, eventDate] = event.split('|'); if (!confirm(`${schoolName} の申込者へアンケートを送りますか？`)) return; setSending(true); try { const res = await wahmsApi.sendSurvey(accountId, schoolName, eventDate); if (!res.success) throw new Error(res.error); flash(`${res.data.success}名へアンケートを送信しました`); await refresh() } catch { setError('アンケートを送信できませんでした') } finally { setSending(false) } }} className="mt-3 w-full rounded-lg bg-green-600 px-4 py-3 font-bold text-white disabled:bg-gray-300">{sending ? '送信中...' : '対象者へアンケートを送る'}</button></div><div className="rounded-xl border bg-white p-5"><h2 className="text-lg font-bold">Flexメッセージ一斉配信</h2><p className="mt-1 text-sm text-gray-500">Flex SimulatorのJSONは「contentsのみ」「message全体」のどちらでも貼り付けできます。</p><input value={altText} onChange={(e) => setAltText(e.target.value)} className="mt-4 w-full rounded-lg border p-3 text-sm" placeholder="通知に表示する短い文" /><textarea value={json} onChange={(e) => setJson(e.target.value)} className="mt-3 min-h-64 w-full rounded-lg border p-3 font-mono text-xs" placeholder='{"type":"bubble", ...}' /><button disabled={!json || sending} onClick={async () => { let contents: unknown; try { contents = JSON.parse(json) } catch { setError('Flex JSONの形式が正しくありません'); return } if (!confirm('WAHMSの友だち全員へ一斉配信しますか？')) return; setSending(true); try { const res = await wahmsApi.sendFlex(accountId, altText, contents); if (!res.success) throw new Error(res.error); flash('Flexメッセージを配信しました'); await refresh() } catch (error) { setError(error instanceof Error ? error.message : 'Flexメッセージを配信できませんでした') } finally { setSending(false) } }} className="mt-3 w-full rounded-lg bg-gray-900 px-4 py-3 font-bold text-white disabled:bg-gray-300">配信する</button></div><div className="lg:col-span-2 rounded-xl border border-blue-200 bg-blue-50 p-4"><p className="font-bold text-blue-900">安全なテスト送信</p><p className="mt-1 text-sm text-blue-800">自分のLINE IDだけに送信します。一斉配信はしません。</p><input value={testRecipientId} onChange={(e) => setTestRecipientId(e.target.value)} placeholder="Uから始まるLINE ID" className="mt-3 w-full rounded-lg border border-blue-200 bg-white p-3 text-sm" /><div className="mt-3 flex flex-wrap gap-2"><button disabled={!event || sending} onClick={() => void sendTest('survey')} className="rounded-lg border border-green-600 bg-white px-4 py-2 text-sm font-bold text-green-700 disabled:border-gray-300 disabled:text-gray-400">アンケートをテスト送信</button><button disabled={!json || sending} onClick={() => void sendTest('flex')} className="rounded-lg border border-gray-800 bg-white px-4 py-2 text-sm font-bold text-gray-800 disabled:border-gray-300 disabled:text-gray-400">Flexをテスト送信</button></div></div><div className="lg:col-span-2 rounded-xl border bg-white"><div className="border-b px-4 py-3 font-bold">配信履歴</div>{data.deliveryLogs.map((log) => <div key={log.id} className="flex items-center justify-between border-b px-4 py-3 text-sm"><div><span className="mr-2 rounded bg-gray-100 px-2 py-1 text-xs">{log.delivery_type === 'survey' ? 'アンケート' : 'Flex'}</span>{log.title}</div><div className="text-xs text-gray-500">成功 {log.success_count} / 失敗 {log.failure_count} ・ {dateLabel(log.created_at)}</div></div>)}</div></section>
+  return <section className="grid gap-5 lg:grid-cols-2"><div className="rounded-xl border bg-white p-5"><h2 className="text-lg font-bold">当日の講義アンケートを送る</h2><p className="mt-1 text-sm text-gray-500">開催日と学校を選ぶと、その講義の申込者だけに送信します。当日の講義があれば最初から選ばれています。</p><select value={event} onChange={(e) => setEvent(e.target.value)} className="mt-4 w-full rounded-lg border p-3 text-sm"><option value="">講義を選択</option>{sortedEvents.map((a) => { const d = String(a.event_date || '').slice(0, 10).replace(/\//g, '-'); const days = Math.round((new Date(d).getTime() - new Date(today).getTime()) / 86400000); const when = d === today ? '本日' : days > 0 ? `${days}日後` : `${-days}日前`; return <option key={a.id} value={`${a.school_name}|${String(a.event_date || '').slice(0, 10)}`}>{d === today ? '● ' : ''}{a.school_name}｜{dateLabel(a.event_date)}（{when}）</option> })}</select><button disabled={!event || sending} onClick={async () => { const [schoolName, eventDate] = event.split('|'); if (!confirm(`${schoolName} の申込者へアンケートを送りますか？`)) return; setSending(true); try { const res = await wahmsApi.sendSurvey(accountId, schoolName, eventDate); if (!res.success) throw new Error(res.error); flash(`${res.data.success}名へアンケートを送信しました`); await refresh() } catch { setError('アンケートを送信できませんでした') } finally { setSending(false) } }} className="mt-3 w-full rounded-lg bg-green-600 px-4 py-3 font-bold text-white disabled:bg-gray-300">{sending ? '送信中...' : '対象者へアンケートを送る'}</button></div><div className="rounded-xl border bg-white p-5"><h2 className="text-lg font-bold">Flexメッセージ一斉配信</h2><p className="mt-1 text-sm text-gray-500">Flex SimulatorのJSONは「contentsのみ」「message全体」のどちらでも貼り付けできます。</p><input value={altText} onChange={(e) => setAltText(e.target.value)} className="mt-4 w-full rounded-lg border p-3 text-sm" placeholder="通知に表示する短い文" /><textarea value={json} onChange={(e) => setJson(e.target.value)} className="mt-3 min-h-64 w-full rounded-lg border p-3 font-mono text-xs" placeholder='{"type":"bubble", ...}' /><button disabled={!json || sending} onClick={async () => { let contents: unknown; try { contents = JSON.parse(json) } catch { setError('Flex JSONの形式が正しくありません'); return } if (!confirm('WAHMSの友だち全員へ一斉配信しますか？')) return; setSending(true); try { const res = await wahmsApi.sendFlex(accountId, altText, contents); if (!res.success) throw new Error(res.error); flash('Flexメッセージを配信しました'); await refresh() } catch (error) { setError(error instanceof Error ? error.message : 'Flexメッセージを配信できませんでした') } finally { setSending(false) } }} className="mt-3 w-full rounded-lg bg-gray-900 px-4 py-3 font-bold text-white disabled:bg-gray-300">配信する</button></div><div className="lg:col-span-2 rounded-xl border border-blue-200 bg-blue-50 p-4"><p className="font-bold text-blue-900">安全なテスト送信</p><p className="mt-1 text-sm text-blue-800">自分のLINE IDだけに送信します。一斉配信はしません。</p><input value={testRecipientId} onChange={(e) => setTestRecipientId(e.target.value)} placeholder="Uから始まるLINE ID" className="mt-3 w-full rounded-lg border border-blue-200 bg-white p-3 text-sm" /><div className="mt-3 flex flex-wrap gap-2"><button disabled={!event || sending} onClick={() => void sendTest('survey')} className="rounded-lg border border-green-600 bg-white px-4 py-2 text-sm font-bold text-green-700 disabled:border-gray-300 disabled:text-gray-400">アンケートをテスト送信</button><button disabled={!json || sending} onClick={() => void sendTest('flex')} className="rounded-lg border border-gray-800 bg-white px-4 py-2 text-sm font-bold text-gray-800 disabled:border-gray-300 disabled:text-gray-400">Flexをテスト送信</button></div></div><div className="lg:col-span-2 rounded-xl border bg-white"><div className="border-b px-4 py-3 font-bold">配信履歴</div>{data.deliveryLogs.map((log) => <div key={log.id} className="flex items-center justify-between border-b px-4 py-3 text-sm"><div><span className="mr-2 rounded bg-gray-100 px-2 py-1 text-xs">{log.delivery_type === 'survey' ? 'アンケート' : 'Flex'}</span>{log.title}</div><div className="text-xs text-gray-500">成功 {log.success_count} / 失敗 {log.failure_count} ・ {dateLabel(log.created_at)}</div></div>)}</div></section>
 }
