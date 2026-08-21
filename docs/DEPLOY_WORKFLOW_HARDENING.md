@@ -89,6 +89,27 @@ workflowの `sed` はD1バインディングの `account_id` / `database_id` は
 恒久対応としては、`wrangler.toml` の `[vars]` を本番の実態に合わせるか、
 workflow側でこれらも差し替えるかを決める必要がある。
 
+## 問題5: 管理画面のdeployが Preview になる
+
+`wrangler pages deploy` はブランチ名から公開先を決める。作業ブランチにいる
+まま実行すると **Preview** として公開され、成功メッセージも出るが本番には
+何も反映されない。2026-08-21に実際にこれで一度反映漏れを起こしている。
+
+```bash
+# 必ず --branch main を付ける
+pnpm exec wrangler pages deploy apps/web/out \
+  --project-name=frei-career-admin --branch main
+
+# 公開後に Environment が Production か確認する
+pnpm exec wrangler pages deployment list --project-name frei-career-admin
+```
+
+チャンク名まで確認すると確実。
+
+```bash
+curl -s https://frei-career-admin.pages.dev/wahms | grep -oE '/_next/static/chunks/app/wahms/page-[a-z0-9]+\.js'
+```
+
 ## 適用するパッチ
 
 `workflow` scope を付与したうえで、次を適用して push する。

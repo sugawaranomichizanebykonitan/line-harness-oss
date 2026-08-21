@@ -18,6 +18,7 @@
 - 担当者による1対1返信には `X-Line-Harness-Source: manual` を付ける。予約通知などの自動送信には付けない。
 - Google Meet相談の確定・変更時は、Calendar更新後に `POST /api/meet-consultations` へ登録する。キャンセル時は `DELETE /api/meet-consultations/:externalEventId` を実行する。
 - 変更は専用ブランチ、テスト、commit、push、PRの順で管理する。上流 `Shudesu/line-harness-oss` の更新もPRで取り込む。
+- **管理画面をdeployするときは必ず `--branch main` を付ける。** 付け忘れると Preview として公開され、成功したように見えて本番には何も届かない。公開後は `wrangler pages deployment list` で Environment が Production になっていることを確認する。
 - **Workerをdeployするときは必ず `--keep-vars` を付ける。** 本番の `WAHMS_LEGACY_WEBHOOK_URL` と `WAHMS_LEGACY_LINE_ACCOUNT_ID` はsecretではなく手動設定のplain text varsで、付け忘れると消えてWAHMSのリッチメニュー応答が止まる。詳細は `docs/DEPLOY_WORKFLOW_HARDENING.md`。
 - **GitHub Actionsの自動公開はまだ有効化しない。** `docs/DEPLOY_WORKFLOW_HARDENING.md` の2つの修正を適用してから。
 - 本番D1の `_migrations` は2026-08-21に整備済み（76件記録）。既存migrationの記録を消して再実行しないこと。経緯は `docs/D1_MIGRATION_RECONCILIATION.md`。
