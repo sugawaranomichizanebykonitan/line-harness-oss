@@ -48,6 +48,47 @@ GitHub Variables に `WORKER_NAME=frei-career` と
 `PAGES_PROJECT_NAME=frei-career-admin` を**先に**登録し、登録済みであることを
 確認してから `LINE_HARNESS_CLOUDFLARE_DEPLOY=true` にする。
 
+## 問題3: ビルド出力先のパスが合っておらず、そもそもdeployが失敗する
+
+workflowは `dist/line_harness/wrangler.json` を参照しているが、実際のビルド
+出力は **`dist/frei_career/wrangler.json`** に生成される。
+
+出力ディレクトリ名は `wrangler.toml` の `name` から決まる。本家は
+`line-harness` だが、このforkは `frei-career` へリネームしているため、
+`line_harness` というディレクトリは存在しない。
+
+```bash
+$ ls apps/worker/dist/
+client  frei_career        # line_harness は無い
+```
+
+結果として `Patch wrangler config` の `sed` が失敗し、deployにも到達しない。
+**問題1・2を直しても、これを直さない限り自動公開は動かない。**
+自動公開の実行履歴が0件なのは、これが理由である可能性が高い。
+
+修正はパス指定をWorker名から導出するか、`frei_career` を直接指定する。
+
+## 問題4: 本番の実値がテンプレートの値で上書きされる
+
+ビルドされた `wrangler.json` の `vars` は次のようになっている。
+
+```text
+CF_ACCOUNT_ID       = YOUR_DEV_ACCOUNT_ID          ← プレースホルダのまま
+D1_DATABASE_ID      = YOUR_DEV_D1_DATABASE_ID      ← プレースホルダのまま
+LIFF_PAGES_PROJECT  = frei-career-liff             ← 本番の実値は line-harness-liff
+WORKER_PUBLIC_URL   = https://frei-career.workers.dev
+                                                   ← 本番の実値は
+                                                     https://frei-career.frei-career-consulting.workers.dev
+WAHMS_LEGACY_*      = （記載なし）                  ← 本番には手動設定あり
+```
+
+workflowの `sed` はD1バインディングの `account_id` / `database_id` は
+差し替えるが、`vars` 側の `CF_ACCOUNT_ID` / `D1_DATABASE_ID` は差し替えない。
+
+`--keep-vars` を付ければ本番の実値が保持されるため、当面の実害は避けられる。
+恒久対応としては、`wrangler.toml` の `[vars]` を本番の実態に合わせるか、
+workflow側でこれらも差し替えるかを決める必要がある。
+
 ## 適用するパッチ
 
 `workflow` scope を付与したうえで、次を適用して push する。
