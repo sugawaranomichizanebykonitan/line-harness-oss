@@ -25,6 +25,8 @@ import { replyViaHarnessProxy } from '../services/line-proxy-send.js';
 import type { HarnessProxyDispatch } from '../services/line-proxy-send.js';
 import { dispatchLineProxyLocally } from '../services/local-line-proxy.js';
 
+import { parseArchiveRequest, buildArchiveReply } from '../services/wahms-archive.js';
+
 const webhook = new Hono<Env>();
 
 // LINE webhook bodies are small (events array). Cap defends against unauthenticated
@@ -183,6 +185,25 @@ webhook.post('/webhook', async (c) => {
     c.env.WAHMS_LEGACY_WEBHOOK_URL,
   );
 
+  // アーカイブ一覧は管理画面から登録するようになったので、Worker が D1 から
+  // 直接返す。Apps Script も同じイベントを受け取ると二重返信になるため、
+  // 「全イベントがアーカイブ要求のとき」だけ転送を止めて Worker が応答する。
+  //
+  // 1回の webhook に他の種類のイベントが混ざっている場合は、取りこぼしを
+  // 避けて従来どおり丸ごと Apps Script へ渡し、Worker は応答しない。
+  // (LINE は利用者の1操作につき1イベントで送ってくるため、実運用では
+  //  ほぼ常に「アーカイブ要求のみ」になる)
+  const archiveRequests = legacyReplyOwner
+    ? body.events.filter(
+        (e) =>
+          e.type === 'message' &&
+          e.message?.type === 'text' &&
+          Boolean(parseArchiveRequest(e.message.text)),
+      )
+    : [];
+  const answerArchiveLocally =
+    archiveRequests.length > 0 && archiveRequests.length === body.events.length;
+
   // 非同期処理 — LINE は ~1s 以内のレスポンスを要求
   const processingPromise = (async () => {
     const proxyDispatch: HarnessProxyDispatch = (request) =>
@@ -200,6 +221,7 @@ webhook.post('/webhook', async (c) => {
           c.env.IMAGES,
           proxyDispatch,
           legacyReplyOwner,
+          answerArchiveLocally,
         );
       } catch (err) {
         console.error('Error handling webhook event:', err);
@@ -216,7 +238,10 @@ webhook.post('/webhook', async (c) => {
   if (
     matchedAccountId &&
     c.env.WAHMS_LEGACY_LINE_ACCOUNT_ID === matchedAccountId &&
-    c.env.WAHMS_LEGACY_WEBHOOK_URL
+    c.env.WAHMS_LEGACY_WEBHOOK_URL &&
+    // アーカイブ要求は Worker が返すので転送しない。転送すると Apps Script も
+    // 返してしまい、利用者に同じ一覧が2通届く。
+    !answerArchiveLocally
   ) {
     c.executionCtx.waitUntil(
       forwardToLegacyWebhook(c.env.WAHMS_LEGACY_WEBHOOK_URL, rawBody),
@@ -237,6 +262,7 @@ async function handleEvent(
   r2?: R2Bucket,
   proxyDispatch?: HarnessProxyDispatch,
   legacyReplyOwner = false,
+  answerArchiveLocally = false,
 ): Promise<void> {
   if (event.type === 'follow') {
     const userId =
@@ -582,6 +608,26 @@ async function handleEvent(
     // would race the established rich-menu / booking responses.
     if (legacyReplyOwner) {
       await upsertChatOnMessage(db, friend.id);
+
+      // アーカイブ要求だけは Worker が D1 から返す。この webhook は Apps Script
+      // へ転送していないので、replyToken を使うのはここだけになる。
+      const school = answerArchiveLocally ? parseArchiveRequest(incomingText) : null;
+      if (school && lineAccountId && event.replyToken) {
+        try {
+          const text = await buildArchiveReply(db, lineAccountId, school);
+          if (text) {
+            await lineClient.replyMessage(event.replyToken, [{ type: 'text', text }]);
+          } else {
+            // 該当学校が D1 に無い。黙って落とさず、その旨を返す。
+            console.warn(`[wahms-archive] unknown school: ${school}`);
+            await lineClient.replyMessage(event.replyToken, [
+              { type: 'text', text: 'アーカイブが見つかりませんでした。メニューからもう一度お試しください。' },
+            ]);
+          }
+        } catch (err) {
+          console.error('[wahms-archive] reply failed', err);
+        }
+      }
       return;
     }
 
