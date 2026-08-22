@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import type { Env } from '../index.js';
 
 /**
@@ -101,7 +102,9 @@ button:disabled{background:#9ca3af}
 }
 
 /** 回答フォーム。LINEアプリの外、普通のブラウザで開ける。 */
-publicSurvey.get('/wahms/survey', async (c) => {
+// 受講者に渡すURLは中立なドメイン (wahms.pages.dev) からプロキシする。
+// そのとき /wahms/survey だとパスが二重になるので、短い /survey でも同じ画面を出す。
+const surveyFormHandler = async (c: Context<Env>) => {
   const school = c.req.query('school')?.trim() || c.req.query('s')?.trim() || '';
   const accountId = await wahmsAccountId(c.env.DB);
   if (!accountId) return c.html(page(`<div class="card"><h1>アンケートを表示できません</h1><p class="sub">運営までお問い合わせください。</p></div>`), 500);
@@ -157,7 +160,8 @@ f.addEventListener('submit',async(ev)=>{
     const r=await fetch('/api/public/wahms-survey',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
     const j=await r.json();
     if(!j.success)throw new Error(j.error||'送信できませんでした');
-    location.href='/wahms/survey/thanks';
+    // 今いるパスの末尾に /thanks を足す。/survey でも /wahms/survey でも動く。
+    location.href=location.pathname.replace(/\/+$/,'')+'/thanks';
   }catch(err){
     e.innerHTML='<div class="err">'+(err.message||'送信できませんでした')+'</div>';
     b.disabled=false;b.textContent='回答を送信する';
@@ -165,10 +169,10 @@ f.addEventListener('submit',async(ev)=>{
   }
 });
 </script>`));
-});
+};
 
 /** 送信後の画面。ここを公式LINEへの入口にする。 */
-publicSurvey.get('/wahms/survey/thanks', (c) =>
+const thanksHandler = (c: Context<Env>) =>
   c.html(page(`<div class="card done">
   <h1>ご回答ありがとうございました</h1>
   <p class="sub">いただいたご意見は、今後の講義づくりに活かしてまいります。</p>
@@ -176,8 +180,12 @@ publicSurvey.get('/wahms/survey/thanks', (c) =>
     今後の講義のご案内、アーカイブ動画の視聴は<br>公式LINEからご利用いただけます。
   </p>
   <a class="line-btn" href="${WAHMS_ADD_FRIEND_URL}">公式LINEを友だち追加する</a>
-</div>`)),
-);
+</div>`));
+
+publicSurvey.get('/survey', surveyFormHandler);
+publicSurvey.get('/wahms/survey', surveyFormHandler);
+publicSurvey.get('/survey/thanks', thanksHandler);
+publicSurvey.get('/wahms/survey/thanks', thanksHandler);
 
 publicSurvey.post('/api/public/wahms-survey', async (c) => {
   type SurveyBody = {

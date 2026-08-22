@@ -296,6 +296,7 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
     if (
       path !== '/webhook' &&
       !path.startsWith('/wahms/survey') &&
+      !path.startsWith('/survey') &&
       !path.startsWith('/auth/') &&
       path !== '/setup' &&
       !path.startsWith('/t/') &&
@@ -362,6 +363,9 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
     // 認証を要求すると本来の目的 (LINEを持たない人が答える) が果たせない。
     path === '/wahms/survey' ||
     path === '/wahms/survey/thanks' ||
+    // 中立ドメイン (wahms.pages.dev) からプロキシしたときの短いパス
+    path === '/survey' ||
+    path === '/survey/thanks' ||
     (path === '/api/public/wahms-survey' && method === 'POST') ||
     path === '/api/qr' || // Public QR proxy — used by desktop landing pages
     path === '/api/health' || // Liveness probe (update CLI / self-update verify)
