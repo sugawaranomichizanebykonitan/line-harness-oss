@@ -75,6 +75,23 @@ describe('回答フォームの表示', () => {
     expect(html).not.toContain('liff');
   });
 
+  test('埋め込んだJavaScriptが構文エラーになっていない', async () => {
+    // テンプレートリテラル内でJSを書くとエスケープが壊れやすい。壊れると
+    // 送信処理そのものが動かず、利用者からは「押しても何も起きない」に見える。
+    // 実際に一度これで送信不能になったので、構文として通ることを固定する。
+    const html = await (await get('/wahms/survey?school=マネジメント学校', fakeDb([]))).text();
+    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const code of scripts) {
+      expect(() => new Function(code)).not.toThrow();
+    }
+  });
+
+  test('送信後はお礼画面へ遷移する', async () => {
+    const html = await (await get('/survey?school=マネジメント学校', fakeDb([]))).text();
+    expect(html).toContain("'thanks'");
+  });
+
   test('該当する講義が無ければ404', async () => {
     const res = await get('/wahms/survey?school=存在しない学校', fakeDb([], { lectureFound: false }));
     expect(res.status).toBe(404);

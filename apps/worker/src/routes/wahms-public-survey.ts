@@ -161,7 +161,8 @@ f.addEventListener('submit',async(ev)=>{
     const j=await r.json();
     if(!j.success)throw new Error(j.error||'送信できませんでした');
     // 今いるパスの末尾に /thanks を足す。/survey でも /wahms/survey でも動く。
-    location.href=location.pathname.replace(/\/+$/,'')+'/thanks';
+    // テンプレートリテラル内で正規表現を書くとエスケープが壊れるので使わない。
+    location.href=location.pathname+(location.pathname.endsWith('/')?'':'/')+'thanks';
   }catch(err){
     e.innerHTML='<div class="err">'+(err.message||'送信できませんでした')+'</div>';
     b.disabled=false;b.textContent='回答を送信する';
