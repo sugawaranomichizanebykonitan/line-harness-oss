@@ -184,6 +184,14 @@ wahms.post('/api/wahms/surveys/:id/reply', async (c) => {
     'SELECT id, line_user_id, question FROM wahms_survey_responses WHERE id = ? AND line_account_id = ?',
   ).bind(c.req.param('id'), scope.account.id).first<{ id: string; line_user_id: string; question: string | null }>();
   if (!survey) return c.json({ success: false, error: '回答が見つかりません' }, 404);
+  // Web版アンケート (LINE未登録の受講者) は送信先が無い。LINE送信を試みても
+  // 必ず失敗するので、理由が分かる形で止める。
+  if (survey.line_user_id.startsWith('web-')) {
+    return c.json(
+      { success: false, error: 'Web回答のため、LINEで返信できません。別の手段でご連絡ください' },
+      400,
+    );
+  }
 
   const message = survey.question
     ? `青山さんへのご質問に回答します。\n\n【ご質問】\n${survey.question}\n\n【回答】\n${answer}`

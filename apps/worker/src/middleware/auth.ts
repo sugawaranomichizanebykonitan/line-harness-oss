@@ -295,6 +295,7 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
     // ただし内部用エンドポイント (/webhook, /auth, /setup) は元の skip 判定に任せる
     if (
       path !== '/webhook' &&
+      !path.startsWith('/wahms/survey') &&
       !path.startsWith('/auth/') &&
       path !== '/setup' &&
       !path.startsWith('/t/') &&
@@ -357,6 +358,11 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
     path === '/api/meet-callback' || // Meet Harness completion callback
     // Google OAuth redirects without admin headers. Route verifies a signed, expiring state.
     (path === '/api/booking/google-calendar/oauth/callback' && method === 'GET') ||
+    // LINE登録なしで回答できる講義アンケート。紹介で直接参加した受講者向けで、
+    // 認証を要求すると本来の目的 (LINEを持たない人が答える) が果たせない。
+    path === '/wahms/survey' ||
+    path === '/wahms/survey/thanks' ||
+    (path === '/api/public/wahms-survey' && method === 'POST') ||
     path === '/api/qr' || // Public QR proxy — used by desktop landing pages
     path === '/api/health' || // Liveness probe (update CLI / self-update verify)
     // Public lead form. Origin validation and field validation happen in-route.
