@@ -22,6 +22,26 @@ const NEXT_INTENTS = ['必ず参加したい', '是非参加したい', 'でき�
 
 const WAHMS_ADD_FRIEND_URL = 'https://line.me/R/ti/p/@393ixqsd';
 
+/**
+ * URLに載せる学校の英字キー。
+ *
+ * 学校名をそのままURLに入れると日本語が混ざり、Zoomのチャットなどで
+ * URLとして認識されずリンクにならない。受講者に配るURLは英数字だけにする。
+ */
+const SCHOOL_SLUGS: Record<string, string> = {
+  marketing: 'マーケティング学校',
+  aoyama: '青山塾',
+  web: 'WEB学校',
+  sales: 'セールス学校',
+  management: 'マネジメント学校',
+  human: '人間力学校',
+};
+
+/** 英字キーなら学校名へ、それ以外(日本語)はそのまま返す。旧URLも生かす。 */
+function resolveSchool(raw: string): string {
+  return SCHOOL_SLUGS[raw.toLowerCase()] ?? raw;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -104,8 +124,10 @@ button:disabled{background:#9ca3af}
 /** 回答フォーム。LINEアプリの外、普通のブラウザで開ける。 */
 // 受講者に渡すURLは中立なドメイン (wahms.pages.dev) からプロキシする。
 // そのとき /wahms/survey だとパスが二重になるので、短い /survey でも同じ画面を出す。
-const surveyFormHandler = async (c: Context<Env>) => {
-  const school = c.req.query('school')?.trim() || c.req.query('s')?.trim() || '';
+const makeSurveyFormHandler = (basePath: string) => async (c: Context<Env>) => {
+  const raw =
+    c.req.param('slug')?.trim() || c.req.query('school')?.trim() || c.req.query('s')?.trim() || '';
+  const school = raw ? resolveSchool(raw) : '';
   const accountId = await wahmsAccountId(c.env.DB);
   if (!accountId) return c.html(page(`<div class="card"><h1>アンケートを表示できません</h1><p class="sub">運営までお問い合わせください。</p></div>`), 500);
 
@@ -160,9 +182,7 @@ f.addEventListener('submit',async(ev)=>{
     const r=await fetch('/api/public/wahms-survey',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
     const j=await r.json();
     if(!j.success)throw new Error(j.error||'送信できませんでした');
-    // 今いるパスの末尾に /thanks を足す。/survey でも /wahms/survey でも動く。
-    // テンプレートリテラル内で正規表現を書くとエスケープが壊れるので使わない。
-    location.href=location.pathname+(location.pathname.endsWith('/')?'':'/')+'thanks';
+    location.href='${basePath}/thanks';
   }catch(err){
     e.innerHTML='<div class="err">'+(err.message||'送信できませんでした')+'</div>';
     b.disabled=false;b.textContent='回答を送信する';
@@ -183,10 +203,14 @@ const thanksHandler = (c: Context<Env>) =>
   <a class="line-btn" href="${WAHMS_ADD_FRIEND_URL}">公式LINEを友だち追加する</a>
 </div>`));
 
-publicSurvey.get('/survey', surveyFormHandler);
-publicSurvey.get('/wahms/survey', surveyFormHandler);
+// /survey/thanks を先に登録する。後の /survey/:slug が thanks を学校名として
+// 拾ってしまわないよう、順番を入れ替えてはいけない。
 publicSurvey.get('/survey/thanks', thanksHandler);
 publicSurvey.get('/wahms/survey/thanks', thanksHandler);
+publicSurvey.get('/survey', makeSurveyFormHandler('/survey'));
+publicSurvey.get('/survey/:slug', makeSurveyFormHandler('/survey'));
+publicSurvey.get('/wahms/survey', makeSurveyFormHandler('/wahms/survey'));
+publicSurvey.get('/wahms/survey/:slug', makeSurveyFormHandler('/wahms/survey'));
 
 publicSurvey.post('/api/public/wahms-survey', async (c) => {
   type SurveyBody = {
@@ -217,7 +241,8 @@ publicSurvey.post('/api/public/wahms-survey', async (c) => {
   if (!accountId) return c.json({ success: false, error: '送信できませんでした' }, 500);
 
   // 実在する講義かを確認する。任意の学校名を投げ込まれても保存しない。
-  const lecture = await findLecture(c.env.DB, accountId, school.replace(/^\S+\s*/, '').trim() || school);
+  const named = resolveSchool(school);
+  const lecture = await findLecture(c.env.DB, accountId, named.replace(/^\S+\s*/, '').trim() || named);
   if (!lecture) return c.json({ success: false, error: '講義を特定できませんでした' }, 400);
 
   const question = body.question?.trim() || null;

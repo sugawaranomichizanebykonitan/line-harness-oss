@@ -13,8 +13,10 @@ const ORIGIN = 'https://frei-career.frei-career-consulting.workers.dev';
 
 /** 受講者に見せる入口。ここ以外は開けない。 */
 const ALLOWED = [
-  /^\/survey$/,
-  /^\/survey\/thanks$/,
+  // /survey と /survey/<学校の英字キー>、および /survey/thanks。
+  // 学校名を日本語でURLに載せると Zoom のチャットなどでリンクにならないため、
+  // 受講者に配るURLは英数字だけにしている。
+  /^\/survey(?:\/[A-Za-z0-9_-]+)?$/,
   /^\/api\/public\/wahms-survey$/,
 ];
 

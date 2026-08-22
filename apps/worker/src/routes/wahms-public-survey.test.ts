@@ -87,9 +87,37 @@ describe('回答フォームの表示', () => {
     }
   });
 
-  test('送信後はお礼画面へ遷移する', async () => {
-    const html = await (await get('/survey?school=マネジメント学校', fakeDb([]))).text();
-    expect(html).toContain("'thanks'");
+  test('学校を英字キーで指定できる', async () => {
+    // 日本語のURLはZoomのチャットなどでリンクとして認識されない。
+    // 受講者に配るURLは英数字だけで完結する必要がある。
+    const res = await get('/survey/management', fakeDb([]));
+    expect(res.status).toBe(200);
+    await expect(res.text()).resolves.toContain('📈 マネジメント学校');
+  });
+
+  test('英字キーは大文字でも開ける', async () => {
+    expect((await get('/survey/Management', fakeDb([]))).status).toBe(200);
+  });
+
+  test('日本語の旧URLも引き続き開ける', async () => {
+    // すでに配ったURLを死なせない。
+    expect((await get('/survey?school=マネジメント学校', fakeDb([]))).status).toBe(200);
+  });
+
+  test('英字キーで開いても送信後はお礼画面へ遷移する', async () => {
+    // /survey/management から相対で /thanks を足すと
+    // /survey/management/thanks になってしまう。固定パスであることを確かめる。
+    const html = await (await get('/survey/management', fakeDb([]))).text();
+    expect(html).toContain("location.href='/survey/thanks'");
+    const wahms = await (await get('/wahms/survey/management', fakeDb([]))).text();
+    expect(wahms).toContain("location.href='/wahms/survey/thanks'");
+  });
+
+  test('/survey/thanks は学校名として扱われない', async () => {
+    // ルート登録の順番を入れ替えるとお礼画面が「講義が見つかりません」になる。
+    const res = await get('/survey/thanks', fakeDb([], { lectureFound: false }));
+    expect(res.status).toBe(200);
+    await expect(res.text()).resolves.toContain('ご回答ありがとうございました');
   });
 
   test('該当する講義が無ければ404', async () => {

@@ -7,11 +7,23 @@
 受講者に渡すURL:
 
 ```text
-https://wahms.pages.dev/survey?school=マネジメント学校
+https://wahms.pages.dev/survey/management
 ```
 
-末尾の学校名を変えるだけで各校に対応する。日付は不要 (その日の講義を
-サーバ側で判定する)。
+| 学校 | URL末尾 |
+| --- | --- |
+| マーケティング学校 | `marketing` |
+| 青山塾 | `aoyama` |
+| WEB学校 | `web` |
+| セールス学校 | `sales` |
+| マネジメント学校 | `management` |
+| 人間力学校 | `human` |
+
+日付は不要 (その日の講義をサーバ側で判定する)。
+
+URLに日本語を入れないのは、Zoomのチャットなどに貼ったとき日本語部分が
+URLと認識されず、リンクが途中で切れてしまうため。
+旧形式の `?school=マネジメント学校` も引き続き開ける。
 
 ## 公開方法
 
@@ -33,6 +45,6 @@ pnpm exec wrangler pages deploy apps/wahms-survey/public \
 入口は次の3つだけに絞っている。この中立ドメインから管理APIや他の機能へ
 到達できてはいけない。
 
-- `/survey`
+- `/survey` と `/survey/<学校の英字キー>`
 - `/survey/thanks`
 - `/api/public/wahms-survey`
