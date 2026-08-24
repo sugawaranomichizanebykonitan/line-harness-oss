@@ -143,7 +143,7 @@ wahms.get('/api/wahms/overview', async (c) => {
     c.env.DB.prepare('SELECT COUNT(*) AS count FROM wahms_participants WHERE line_account_id = ?').bind(accountId).first<{ count: number }>(),
     c.env.DB.prepare(`SELECT COUNT(*) AS count FROM wahms_applications WHERE line_account_id = ?${schoolClause}`).bind(...schoolArgs).first<{ count: number }>(),
     c.env.DB.prepare(`SELECT COUNT(*) AS count, AVG(satisfaction) AS average, SUM(CASE WHEN value_rating = '無料なのが信じられない' THEN 1 ELSE 0 END) AS unbelievable FROM wahms_survey_responses WHERE line_account_id = ?${schoolClause}`).bind(...schoolArgs).first<{ count: number; average: number | null; unbelievable: number }>(),
-    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM wahms_survey_responses WHERE line_account_id = ? AND response_status = 'pending'${schoolClause}`).bind(...schoolArgs).first<{ count: number }>(),
+    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM wahms_survey_responses WHERE line_account_id = ? AND response_status = 'pending' AND reply_skipped = 0${schoolClause}`).bind(...schoolArgs).first<{ count: number }>(),
     c.env.DB.prepare(`SELECT school_name, MAX(event_date) AS latest_date, COUNT(*) AS application_count FROM wahms_applications WHERE line_account_id = ? GROUP BY school_name ORDER BY latest_date DESC`).bind(accountId).all(),
     c.env.DB.prepare(`SELECT p.*, (SELECT COUNT(*) FROM wahms_applications a WHERE a.line_account_id = p.line_account_id AND a.line_user_id = p.line_user_id) AS booking_count FROM wahms_participants p WHERE p.line_account_id = ? AND (? = '' OR p.name LIKE ? OR p.line_display_name LIKE ? OR p.occupation LIKE ?) ORDER BY p.updated_at DESC LIMIT 500`).bind(accountId, search, `%${search}%`, `%${search}%`, `%${search}%`).all(),
     c.env.DB.prepare(`SELECT a.*, COALESCE(p.name, p.line_display_name) AS participant_name FROM wahms_applications a LEFT JOIN wahms_participants p ON p.line_account_id = a.line_account_id AND p.line_user_id = a.line_user_id WHERE a.line_account_id = ?${schoolClause} ORDER BY a.event_date DESC, a.applied_at DESC LIMIT 1000`).bind(...schoolArgs).all(),
@@ -207,6 +207,30 @@ wahms.post('/api/wahms/surveys/:id/reply', async (c) => {
     `UPDATE wahms_survey_responses SET answer = ?, response_status = 'completed', answered_at = datetime('now'), answered_by = ?, updated_at = datetime('now') WHERE id = ?`,
   ).bind(answer, staff?.name || '担当者', survey.id).run();
   return c.json({ success: true, data: { id: survey.id, status: 'completed' } });
+});
+
+/**
+ * 「返信対応しない」。返信するほどでもない質問を要対応リストから外す。
+ *
+ * 回答そのものは消さない。集計には残したまま、対応の要否だけを落とす。
+ * LINEへは何も送らない (送らないことが目的の操作なので)。
+ */
+wahms.post('/api/wahms/surveys/:id/skip', async (c) => {
+  const scope = await requireWahmsAccount(c);
+  if ('error' in scope) return scope.error;
+  const survey = await c.env.DB.prepare(
+    'SELECT id, response_status FROM wahms_survey_responses WHERE id = ? AND line_account_id = ?',
+  ).bind(c.req.param('id'), scope.account.id).first<{ id: string; response_status: string }>();
+  if (!survey) return c.json({ success: false, error: '回答が見つかりません' }, 404);
+  // 返信済みを取り消す操作ではない。履歴を消さないよう手前で止める。
+  if (survey.response_status === 'completed') {
+    return c.json({ success: false, error: 'すでに返信済みのため変更できません' }, 400);
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE wahms_survey_responses SET reply_skipped = 1, updated_at = datetime('now') WHERE id = ?`,
+  ).bind(survey.id).run();
+  return c.json({ success: true, data: { id: survey.id, replySkipped: true } });
 });
 
 wahms.post('/api/wahms/survey-deliveries', async (c) => {

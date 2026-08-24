@@ -38,6 +38,33 @@ function isWebResponse(s: WahmsOverview['surveys'][number]): boolean {
   return String(s.line_user_id ?? '').startsWith('web-')
 }
 
+/**
+ * 「返信対応しない」と決めた質問か。
+ * response_status には CHECK 制約があり値を増やせないので、別の列で持っている。
+ */
+function isReplySkipped(s: WahmsOverview['surveys'][number]): boolean {
+  return Number(s.reply_skipped ?? 0) === 1
+}
+
+/**
+ * 「返信対応しない」ボタン。押すと要対応リストから外れる。
+ *
+ * 戻す操作を画面に用意していないので、押す前に一度確認する。
+ */
+function SkipReplyButton({ surveyId, onSkip }: { surveyId: string; onSkip: (id: string) => Promise<void> }) {
+  const [confirming, setConfirming] = useState(false)
+  if (!confirming) {
+    return <button onClick={() => setConfirming(true)} className="mt-3 rounded-lg border border-gray-300 bg-white px-5 py-3 text-sm font-bold text-gray-600 hover:bg-gray-50">返信対応しない</button>
+  }
+  return <div className="mt-3 rounded-lg border border-gray-300 bg-white p-3">
+    <p className="text-sm text-gray-700">要対応から外し、通常のアンケート結果として扱います。よろしいですか？</p>
+    <div className="mt-2 flex gap-2">
+      <button onClick={() => { setConfirming(false); void onSkip(surveyId) }} className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-bold text-white">外す</button>
+      <button onClick={() => setConfirming(false)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-bold text-gray-600">やめる</button>
+    </div>
+  </div>
+}
+
 /** 申込の開催日を YYYY-MM-DD に揃える。'2026/08/21' 形式が混ざるため。 */
 function eventDay(value?: string | null): string {
   return String(value || '').slice(0, 10).replace(/\//g, '-')
@@ -128,6 +155,16 @@ export default function WahmsPage() {
 
   const flash = (message: string) => { setNotice(message); setTimeout(() => setNotice(''), 5000) }
 
+  // 返信するほどでもない質問を要対応から外す。LINEへは何も送らない。
+  const skipReply = async (surveyId: string) => {
+    if (!selectedAccountId) return
+    try {
+      await wahmsApi.skipReply(selectedAccountId, surveyId)
+      flash('返信対応しないことにしました。要対応リストから外れます')
+      await refresh()
+    } catch { setError('変更できませんでした。時間をおいて試してください。') }
+  }
+
   return <>
     <Header title="WAHMS運営" />
     <main className="mx-auto max-w-7xl p-4 md:p-6">
@@ -160,7 +197,7 @@ export default function WahmsPage() {
       {tab === 'surveys' && data && <section>
         <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4"><Stat label="回答者数" value={`${data.summary.surveyResponses}名`} /><Stat label="平均得点" value={data.summary.averageSatisfaction == null ? '—' : `${data.summary.averageSatisfaction.toFixed(2)} / 5`} /><Stat label="無料なのが信じられない率" value={`${data.summary.unbelievableRate.toFixed(1)}%`} /><Stat label="要対応の質問" value={`${data.summary.pendingQuestions}件`} accent={data.summary.pendingQuestions > 0} /></div>
         <div className="mb-4 flex gap-2 overflow-x-auto pb-1"><button onClick={() => setSchool('')} className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium ${!school ? 'bg-green-600 text-white' : 'bg-white border'}`}>全学校</button>{data.schools.map((s) => <button key={s.school_name} onClick={() => setSchool(s.school_name)} className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium ${school === s.school_name ? 'bg-green-600 text-white' : 'bg-white border'}`}>{s.school_name}</button>)}</div>
-        <div className="space-y-3">{data.surveys.map((s) => <article key={s.id} className="rounded-xl border bg-white p-4"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">{s.school_name}</span><span className="text-xs text-gray-500">{dateLabel(s.responded_at)}</span>{isWebResponse(s) && <span className="rounded-full bg-blue-100 px-2 py-1 text-xs font-bold text-blue-700">Web回答</span>}{s.response_status === 'pending' && <span className="rounded-full bg-red-100 px-2 py-1 text-xs font-bold text-red-700">要対応</span>}{s.response_status === 'completed' && <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-bold text-gray-600">対応完了</span>}</div><div className="mt-3 grid gap-3 text-sm md:grid-cols-4"><div><span className="text-gray-500">回答者</span><p className="font-medium">{s.respondent_name || '名前未登録'}</p></div><div><span className="text-gray-500">満足度</span><p className="font-medium">{s.satisfaction ? `${s.satisfaction} / 5` : '—'}</p></div><div><span className="text-gray-500">価値評価</span><p className="font-medium">{s.value_rating || '—'}</p></div><div><span className="text-gray-500">次回参加意向</span><p className="font-medium">{s.next_intent || '—'}</p></div></div>{s.question && <div className="mt-4 rounded-lg bg-amber-50 p-3"><p className="text-xs font-bold text-amber-700">青山さんへの質問</p><p className="mt-1 text-sm text-gray-800">{s.question}</p>{s.response_status === 'completed' ? <div className="mt-3 border-t border-amber-200 pt-3"><p className="text-xs font-bold text-gray-500">返信済み</p><p className="mt-1 text-sm">{s.answer}</p></div> : isWebResponse(s) ? <div className="mt-3 border-t border-amber-200 pt-3 text-sm text-gray-600">この方は公式LINE未登録のため、ここからは返信できません。別の手段でご連絡ください。</div> : <div className="mt-3 flex flex-col gap-2 md:flex-row"><textarea value={answers[s.id] || ''} onChange={(e) => setAnswers({ ...answers, [s.id]: e.target.value })} placeholder="ここに返信を入力" className="min-h-24 flex-1 rounded-lg border border-amber-300 bg-white p-3 text-sm" /><button onClick={async () => { if (!selectedAccountId) return; try { await wahmsApi.reply(selectedAccountId, s.id, answers[s.id] || ''); flash('LINEへ返信し、対応完了にしました'); await refresh() } catch { setError('返信できませんでした。内容を確認してください。') } }} className="rounded-lg bg-green-600 px-5 py-3 font-bold text-white">LINEへ返信</button></div>}</div>}</article>)}</div>
+        <div className="space-y-3">{data.surveys.map((s) => <article key={s.id} className="rounded-xl border bg-white p-4"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">{s.school_name}</span><span className="text-xs text-gray-500">{dateLabel(s.responded_at)}</span>{isWebResponse(s) && <span className="rounded-full bg-blue-100 px-2 py-1 text-xs font-bold text-blue-700">Web回答</span>}{s.response_status === 'pending' && !isReplySkipped(s) && <span className="rounded-full bg-red-100 px-2 py-1 text-xs font-bold text-red-700">要対応</span>}{s.response_status === 'completed' && <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-bold text-gray-600">対応完了</span>}{isReplySkipped(s) && <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-bold text-gray-600">返信不要</span>}</div><div className="mt-3 grid gap-3 text-sm md:grid-cols-4"><div><span className="text-gray-500">回答者</span><p className="font-medium">{s.respondent_name || '名前未登録'}</p></div><div><span className="text-gray-500">満足度</span><p className="font-medium">{s.satisfaction ? `${s.satisfaction} / 5` : '—'}</p></div><div><span className="text-gray-500">価値評価</span><p className="font-medium">{s.value_rating || '—'}</p></div><div><span className="text-gray-500">次回参加意向</span><p className="font-medium">{s.next_intent || '—'}</p></div></div>{s.question && <div className="mt-4 rounded-lg bg-amber-50 p-3"><p className="text-xs font-bold text-amber-700">青山さんへの質問</p><p className="mt-1 text-sm text-gray-800">{s.question}</p>{s.response_status === 'completed' ? <div className="mt-3 border-t border-amber-200 pt-3"><p className="text-xs font-bold text-gray-500">返信済み</p><p className="mt-1 text-sm">{s.answer}</p></div> : isReplySkipped(s) ? <div className="mt-3 border-t border-amber-200 pt-3 text-sm text-gray-600">返信対応しないことにした質問です。集計には含まれています。</div> : isWebResponse(s) ? <div className="mt-3 border-t border-amber-200 pt-3"><p className="text-sm text-gray-600">この方は公式LINE未登録のため、ここからは返信できません。別の手段でご連絡ください。</p><SkipReplyButton surveyId={s.id} onSkip={skipReply} /></div> : <div className="mt-3 flex flex-col gap-2 md:flex-row"><textarea value={answers[s.id] || ''} onChange={(e) => setAnswers({ ...answers, [s.id]: e.target.value })} placeholder="ここに返信を入力" className="min-h-24 flex-1 rounded-lg border border-amber-300 bg-white p-3 text-sm" /><div className="flex flex-col gap-2"><button onClick={async () => { if (!selectedAccountId) return; try { await wahmsApi.reply(selectedAccountId, s.id, answers[s.id] || ''); flash('LINEへ返信し、対応完了にしました'); await refresh() } catch { setError('返信できませんでした。内容を確認してください。') } }} className="rounded-lg bg-green-600 px-5 py-3 font-bold text-white">LINEへ返信</button><SkipReplyButton surveyId={s.id} onSkip={skipReply} /></div></div>}</div>}</article>)}</div>
       </section>}
 
       {tab === 'archives' && data && <ArchiveTab data={data} accountId={selectedAccountId!} refresh={refresh} flash={flash} setError={setError} />}

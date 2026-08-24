@@ -2195,7 +2195,7 @@ export type WahmsOverview = {
   schools: Array<{ school_name: string; latest_date: string | null; application_count: number }>
   participants: Array<Record<string, unknown> & { id: string; name?: string; line_display_name?: string; occupation?: string; status?: string; booking_count?: number }>
   applications: Array<Record<string, unknown> & { id: string; participant_name?: string; school_name: string; event_date?: string; event_time?: string; theme?: string; attended?: number | null }>
-  surveys: Array<Record<string, unknown> & { id: string; responded_at?: string; school_name: string; satisfaction?: number; value_rating?: string; next_intent?: string; question?: string; answer?: string; respondent_name?: string; response_status: 'none' | 'pending' | 'completed' }>
+  surveys: Array<Record<string, unknown> & { id: string; responded_at?: string; school_name: string; satisfaction?: number; value_rating?: string; next_intent?: string; question?: string; answer?: string; respondent_name?: string; response_status: 'none' | 'pending' | 'completed'; reply_skipped?: number }>
   archives: Array<Record<string, unknown> & { id: string; school_name: string; lecture_number?: string; theme?: string; held_on?: string; youtube_url?: string }>
   deliveryLogs: Array<Record<string, unknown> & { id: string; delivery_type: string; title: string; success_count: number; failure_count: number; created_at: string }>
 }
@@ -2210,6 +2210,11 @@ export const wahmsApi = {
   reply: (accountId: string, surveyId: string, answer: string) =>
     fetchApi<ApiResponse<{ id: string; status: string }>>(`/api/wahms/surveys/${surveyId}/reply?accountId=${encodeURIComponent(accountId)}`, {
       method: 'POST', body: JSON.stringify({ answer }),
+    }),
+  // 返信するほどでもない質問を要対応リストから外す。LINEへは何も送らない。
+  skipReply: (accountId: string, surveyId: string) =>
+    fetchApi<ApiResponse<{ id: string; replySkipped: boolean }>>(`/api/wahms/surveys/${surveyId}/skip?accountId=${encodeURIComponent(accountId)}`, {
+      method: 'POST',
     }),
   // testRecipientId を渡さない＝一斉配信。Worker側が confirmBroadcast を必須にしているため、
   // 一斉配信のときだけ明示的に true を送る。誤って全員へ飛ぶ経路を作らないこと。
