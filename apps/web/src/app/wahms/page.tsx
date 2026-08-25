@@ -272,31 +272,52 @@ function ArchiveTab({ data, accountId, refresh, flash, setError }: { data: Wahms
     [data.archives, school],
   )
 
-  // 回の選択肢は「既にある枠」と「マスターの第11〜20回」を統合する。
-  // 既存の枠を選べば上書き、無い回を選べば新規に作られる。
+  // 回の選択肢。テーマと開催日は**開催予定を正**とする。
+  //
+  // 以前は画面に持たせたマスターと、登録済みのアーカイブ行のテーマを混ぜて
+  // いた。アーカイブ行に古いテーマが残っていると、そちらが勝って別の回の
+  // テーマが表示される (実際にマーケティング学校の第13回が第15回のテーマに
+  // なっていた)。開催予定は申込やリマインドと同じ元データなので、ここを
+  // 正にすればズレようがない。
+  //
+  // マスターは開催予定に無い学校のための保険としてだけ残している。
   const lectureOptions = useMemo(() => {
-    const map = new Map<number, { theme: string; done: boolean }>()
-    for (const l of WAHMS_LECTURE_MASTER[school] ?? []) map.set(l.lecture, { theme: l.theme, done: false })
+    const map = new Map<number, { theme: string; heldOn: string; done: boolean }>()
+    for (const l of WAHMS_LECTURE_MASTER[school] ?? []) {
+      map.set(l.lecture, { theme: l.theme, heldOn: '', done: false })
+    }
+    for (const l of data.lectures || []) {
+      if (l.school_name !== school) continue
+      const n = Number(String(l.lecture_label || '').replace(/[^0-9]/g, ''))
+      if (!n) continue
+      map.set(n, { theme: l.theme || '', heldOn: l.event_date, done: false })
+    }
+    // 動画が登録済みかどうかだけ、アーカイブ行から取る。
     for (const a of rows) {
       const n = Number(a.lecture_number || 0)
+      const known = map.get(n)
       if (!n) continue
-      const master = map.get(n)
       map.set(n, {
-        theme: a.theme || master?.theme || '',
+        theme: known?.theme || a.theme || '',
+        heldOn: known?.heldOn || eventDay(a.held_on),
         done: Boolean(a.youtube_url),
       })
     }
     return Array.from(map.entries()).sort((a, b) => a[0] - b[0])
-  }, [school, rows])
+  }, [school, rows, data.lectures])
 
   // 未登録（動画がまだ無い）いちばん若い回を初期選択にする。
   useEffect(() => {
     const next = lectureOptions.find(([, v]) => !v.done)
     setLecture(next ? String(next[0]) : '')
-    setHeldOn(''); setYoutubeUrl('')
+    setYoutubeUrl('')
   }, [lectureOptions])
 
-  const theme = lectureOptions.find(([n]) => String(n) === lecture)?.[1].theme ?? ''
+  const selected = lectureOptions.find(([n]) => String(n) === lecture)?.[1]
+  const theme = selected?.theme ?? ''
+
+  // 開催日は開催予定から自動で入れる。手で入れ直す必要がない。
+  useEffect(() => { setHeldOn(selected?.heldOn ?? '') }, [lecture, selected?.heldOn])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
