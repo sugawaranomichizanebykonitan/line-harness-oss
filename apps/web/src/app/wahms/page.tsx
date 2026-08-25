@@ -73,47 +73,56 @@ function eventDay(value?: string | null): string {
 /**
  * 「本日の講義に何名申し込んでいるか」を一目で出す。
  * 当日の運営で最初に知りたい数字なので、一覧を数えなくても分かるようにする。
+ *
+ * 申込が0件でも同じ見た目で0名と出す。ここで数えているのは公式LINE経由の
+ * 申込だけで、社内参加者や紹介参加者は入っていない。0件を「開催なし」と
+ * 書くと実際には開催しているのに開催が無いと読めてしまう。
  */
 function TodayPanel({ applications, school }: { applications: WahmsOverview['applications']; school: string }) {
   const today = todayJst()
   const scoped = school ? applications.filter((a) => a.school_name === school) : applications
   const todays = scoped.filter((a) => eventDay(a.event_date) === today)
+  const dayLabel = new Date(today).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })
 
-  if (todays.length > 0) {
-    // 同じ日に同じ学校が複数枠あることは無い想定だが、念のため学校ごとにまとめる。
-    const groups = new Map<string, typeof todays>()
-    for (const a of todays) {
-      const list = groups.get(a.school_name) ?? []
-      list.push(a); groups.set(a.school_name, list)
-    }
-    return <div className="mb-4 space-y-3">
-      {Array.from(groups.entries()).map(([name, list]) => <div key={name} className="flex flex-col gap-3 rounded-xl border-2 border-green-500 bg-green-50 p-4 md:flex-row md:items-center">
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-bold text-green-700">本日開催 {new Date(today).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })}</p>
-          <p className="mt-1 font-bold text-gray-900">{name}</p>
-          <p className="mt-0.5 truncate text-sm text-gray-600">{list[0].event_time ? `${list[0].event_time}　` : ''}{list[0].theme || 'テーマ未設定'}</p>
-        </div>
-        <div className="shrink-0 text-center md:text-right">
-          <span className="text-4xl font-bold text-green-700">{list.length}</span>
-          <span className="ml-1 text-sm font-bold text-green-700">名 申込</span>
-        </div>
-      </div>)}
-    </div>
+  // 同じ日に同じ学校が複数枠あることは無い想定だが、念のため学校ごとにまとめる。
+  const groups = new Map<string, typeof todays>()
+  for (const a of todays) {
+    const list = groups.get(a.school_name) ?? []
+    list.push(a); groups.set(a.school_name, list)
   }
 
-  // 今日は開催なし。次にいつあるのかまで出さないと、結局一覧を見に行くことになる。
-  const upcoming = scoped
+  const cards: Array<{ name: string; detail: string; count: number }> = todays.length > 0
+    ? Array.from(groups.entries()).map(([name, list]) => ({
+        name,
+        detail: `${list[0].event_time ? `${list[0].event_time}　` : ''}${list[0].theme || 'テーマ未設定'}`,
+        count: list.length,
+      }))
+    // 申込0件のときは開催情報が申込テーブルに無いので、学校名だけ出す。
+    : [{ name: school || '全校', detail: '公式LINEからの申込はまだありません', count: 0 }]
+
+  // 次の開催が分かるなら添える。当日が0件のときに一覧を見に行かなくて済む。
+  const upcoming = todays.length > 0 ? null : scoped
     .filter((a) => eventDay(a.event_date) > today)
     .sort((a, b) => eventDay(a.event_date).localeCompare(eventDay(b.event_date)))[0]
   const upcomingCount = upcoming
     ? scoped.filter((a) => a.school_name === upcoming.school_name && eventDay(a.event_date) === eventDay(upcoming.event_date)).length
     : 0
 
-  return <div className="mb-4 rounded-xl border bg-white p-4 text-sm text-gray-600">
-    <span className="font-bold text-gray-900">本日{school ? `の${school}` : ''}の開催はありません。</span>
-    {upcoming
-      ? <>　次回は {dateLabel(upcoming.event_date)}（{upcoming.school_name}）で、現在 <span className="font-bold text-gray-900">{upcomingCount}名</span> の申込があります。</>
-      : <>　申込が入ると、ここに表示されます。</>}
+  return <div className="mb-4 space-y-3">
+    {cards.map((card) => <div key={card.name} className="flex flex-col gap-3 rounded-xl border-2 border-green-500 bg-green-50 p-4 md:flex-row md:items-center">
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-bold text-green-700">本日 {dayLabel}</p>
+        <p className="mt-1 font-bold text-gray-900">{card.name}</p>
+        <p className="mt-0.5 truncate text-sm text-gray-600">{card.detail}</p>
+      </div>
+      <div className="shrink-0 text-center md:text-right">
+        <span className="text-4xl font-bold text-green-700">{card.count}</span>
+        <span className="ml-1 text-sm font-bold text-green-700">名 申込</span>
+      </div>
+    </div>)}
+    {upcoming && <p className="text-sm text-gray-600">
+      次に申込が入っている開催日は {dateLabel(upcoming.event_date)}（{upcoming.school_name}）で、現在 <span className="font-bold text-gray-900">{upcomingCount}名</span> です。
+    </p>}
   </div>
 }
 
