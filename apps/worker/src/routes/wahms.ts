@@ -139,7 +139,7 @@ wahms.get('/api/wahms/overview', async (c) => {
   const schoolClause = school ? ' AND school_name = ?' : '';
   const schoolArgs = school ? [accountId, school] : [accountId];
 
-  const [participantCount, applicationCount, surveyStats, pendingCount, schoolRows, participants, applications, surveys, archives, logs] = await Promise.all([
+  const [participantCount, applicationCount, surveyStats, pendingCount, schoolRows, participants, applications, surveys, archives, logs, lectures] = await Promise.all([
     c.env.DB.prepare('SELECT COUNT(*) AS count FROM wahms_participants WHERE line_account_id = ?').bind(accountId).first<{ count: number }>(),
     c.env.DB.prepare(`SELECT COUNT(*) AS count FROM wahms_applications WHERE line_account_id = ?${schoolClause}`).bind(...schoolArgs).first<{ count: number }>(),
     c.env.DB.prepare(`SELECT COUNT(*) AS count, AVG(satisfaction) AS average, SUM(CASE WHEN value_rating = '無料なのが信じられない' THEN 1 ELSE 0 END) AS unbelievable FROM wahms_survey_responses WHERE line_account_id = ?${schoolClause}`).bind(...schoolArgs).first<{ count: number; average: number | null; unbelievable: number }>(),
@@ -152,6 +152,20 @@ wahms.get('/api/wahms/overview', async (c) => {
     // アーカイブ画面側に独立した学校の絞り込みがあり、そちらで切り替える。
     c.env.DB.prepare(`SELECT * FROM wahms_archives WHERE line_account_id = ? ORDER BY school_name, CAST(lecture_number AS REAL), source_row LIMIT 1000`).bind(accountId).all(),
     c.env.DB.prepare(`SELECT * FROM wahms_delivery_logs WHERE line_account_id = ? ORDER BY created_at DESC LIMIT 30`).bind(accountId).all(),
+    // 開催予定。申込が1件も無い日でも、何時に何をやるのかを画面に出すため。
+    // starts_at はUTCなので、+9時間してJSTの日付と時刻に直して返す。
+    c.env.DB.prepare(
+      `SELECT e.name AS school_name,
+              DATE(s.starts_at, '+9 hours') AS event_date,
+              TIME(s.starts_at, '+9 hours') AS start_time,
+              TIME(s.ends_at, '+9 hours') AS end_time,
+              s.sequence_label AS lecture_label,
+              s.title AS theme
+         FROM event_slots s
+         JOIN events e ON e.id = s.event_id
+        WHERE e.line_account_id = ? AND s.deleted_at IS NULL AND s.is_active = 1
+        ORDER BY s.starts_at`,
+    ).bind(accountId).all(),
   ]);
 
   const count = Number(surveyStats?.count || 0);
@@ -171,6 +185,7 @@ wahms.get('/api/wahms/overview', async (c) => {
     surveys: surveys.results,
     archives: archives.results,
     deliveryLogs: logs.results,
+    lectures: lectures.results,
   }});
 });
 

@@ -70,22 +70,17 @@ function eventDay(value?: string | null): string {
   return String(value || '').slice(0, 10).replace(/\//g, '-')
 }
 
-/** その学校の開催時間。全校とも1つしか使っていないので、履歴から引ける。 */
-function schoolTime(applications: WahmsOverview['applications'], school: string): string {
-  const row = applications
-    .filter((a) => a.school_name === school && a.event_time)
-    .sort((a, b) => eventDay(b.event_date).localeCompare(eventDay(a.event_date)))[0]
-  return String(row?.event_time || '')
+/** 配信画面で選ぶ講義。申込由来と開催予定由来を同じ形にそろえる。 */
+type LectureOption = { id: string; school_name: string; event_date: string; theme?: string }
+
+/** 時刻の秒を落とす。開催予定は 20:30:00 の形で返ってくる。 */
+function hhmm(value?: string): string {
+  return String(value || '').slice(0, 5)
 }
 
-/**
- * 本日開催ぶんのテーマ。申込が1件も無い日は申込テーブルに何も無いので、
- * アーカイブ登録に入っている開催日から引く。
- */
-function todayTheme(archives: WahmsOverview['archives'], school: string, today: string): string {
-  const row = archives.find((a) =>
-    eventDay(a.held_on) === today && (!school || a.school_name === school) && Boolean(a.theme))
-  return String(row?.theme || '')
+/** その日に開催予定の講義。申込が0件でも、時間とテーマはここから出せる。 */
+function lectureOn(lectures: WahmsOverview['lectures'], school: string, day: string) {
+  return (lectures || []).find((l) => l.event_date === day && (!school || l.school_name === school))
 }
 
 /**
@@ -96,7 +91,7 @@ function todayTheme(archives: WahmsOverview['archives'], school: string, today: 
  * 申込だけで、社内参加者や紹介参加者は入っていない。0件を「開催なし」と
  * 書くと実際には開催しているのに開催が無いと読めてしまう。
  */
-function TodayPanel({ applications, archives, school }: { applications: WahmsOverview['applications']; archives: WahmsOverview['archives']; school: string }) {
+function TodayPanel({ applications, lectures, school }: { applications: WahmsOverview['applications']; lectures: WahmsOverview['lectures']; school: string }) {
   const today = todayJst()
   const scoped = school ? applications.filter((a) => a.school_name === school) : applications
   const todays = scoped.filter((a) => eventDay(a.event_date) === today)
@@ -110,20 +105,28 @@ function TodayPanel({ applications, archives, school }: { applications: WahmsOve
   }
 
   const cards: Array<{ name: string; time: string; theme: string; count: number }> = todays.length > 0
-    ? Array.from(groups.entries()).map(([name, list]) => ({
-        name,
-        time: String(list[0].event_time || '') || schoolTime(applications, name),
-        theme: String(list[0].theme || ''),
-        count: list.length,
-      }))
-    // 申込0件の日は申込テーブルに開催情報が無いので、時間は学校の定刻から、
-    // テーマはアーカイブ登録済みの開催日から引く。
-    : [{
-        name: school || '全校',
-        time: school ? schoolTime(applications, school) : '',
-        theme: todayTheme(archives, school, today),
-        count: 0,
-      }]
+    ? Array.from(groups.entries()).map(([name, list]) => {
+        const planned = lectureOn(lectures, name, today)
+        return {
+          name,
+          time: String(list[0].event_time || '')
+            || (planned ? `${hhmm(planned.start_time)}〜${hhmm(planned.end_time)}` : ''),
+          theme: `${planned?.lecture_label ? `${planned.lecture_label}　` : ''}${String(list[0].theme || planned?.theme || '')}`,
+          count: list.length,
+        }
+      })
+    // 申込0件の日は申込テーブルに開催情報が無い。開催予定から引く。
+    : (() => {
+        const planned = lectureOn(lectures, school, today)
+        return [{
+          name: planned?.school_name || school || '全校',
+          time: planned ? `${hhmm(planned.start_time)}〜${hhmm(planned.end_time)}` : '',
+          theme: planned
+            ? `${planned.lecture_label ? `${planned.lecture_label}　` : ''}${planned.theme || ''}`
+            : '本日の開催予定はありません',
+          count: 0,
+        }]
+      })()
 
   return <div className="mb-4 space-y-3">
     {cards.map((card) => <div key={card.name} className="flex flex-col gap-3 rounded-xl border-2 border-green-500 bg-green-50 p-4 md:flex-row md:items-center">
@@ -167,13 +170,22 @@ export default function WahmsPage() {
   }, [selectedAccountId, isWahms, school, search])
 
   useEffect(() => { void refresh() }, [refresh])
-  const eventOptions = useMemo(() => {
+  // 配信先に選べる講義。申込がまだ0件の回も選べないと、当日の朝に
+  // アンケートを準備できない。開催予定と申込の両方から作る。
+  const eventOptions = useMemo<LectureOption[]>(() => {
     const seen = new Set<string>()
-    return (data?.applications || []).filter((item) => {
-      const key = `${item.school_name}|${String(item.event_date || '').slice(0, 10)}`
-      if (seen.has(key)) return false
-      seen.add(key); return true
-    })
+    const out: LectureOption[] = []
+    const push = (schoolName: string, rawDate: string, theme?: string) => {
+      const day = eventDay(rawDate)
+      if (!schoolName || !day) return
+      const key = `${schoolName}|${day}`
+      if (seen.has(key)) return
+      seen.add(key)
+      out.push({ id: key, school_name: schoolName, event_date: day, theme })
+    }
+    for (const a of data?.applications || []) push(String(a.school_name), String(a.event_date || ''), a.theme as string)
+    for (const l of data?.lectures || []) push(l.school_name, l.event_date, l.theme)
+    return out
   }, [data])
 
   if (accountLoading) return <><Header title="WAHMS運営" /><div className="p-8 text-gray-500">読み込み中...</div></>
@@ -215,7 +227,7 @@ export default function WahmsPage() {
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="名前・LINE名・職業で検索" className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm" />
           <button onClick={() => void refresh()} className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-semibold text-white">検索</button>
         </div>
-        <TodayPanel applications={data.applications} archives={data.archives} school={school} />
+        <TodayPanel applications={data.applications} lectures={data.lectures} school={school} />
         {school ? <div className="overflow-hidden rounded-xl border bg-white"><div className="border-b bg-gray-50 px-4 py-3 font-bold">{school} の申込者</div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="p-3">参加者</th><th className="p-3">開催日</th><th className="p-3">時間</th><th className="p-3">テーマ</th><th className="p-3">実参加</th></tr></thead><tbody>{data.applications.map((a) => <tr key={a.id} className={`border-t ${eventDay(a.event_date) === todayJst() ? 'bg-green-50' : ''}`}><td className="p-3 font-medium">{a.participant_name || '名前未登録'}{eventDay(a.event_date) === todayJst() && <span className="ml-2 rounded bg-green-600 px-1.5 py-0.5 text-[10px] font-bold text-white">本日</span>}</td><td className="p-3">{dateLabel(a.event_date)}</td><td className="p-3">{a.event_time || '—'}</td><td className="max-w-md p-3">{a.theme || '—'}</td><td className="p-3">{a.attended == null ? '未確認' : a.attended ? '参加' : '不参加'}</td></tr>)}</tbody></table></div></div>
         : <div className="overflow-hidden rounded-xl border bg-white"><div className="border-b bg-gray-50 px-4 py-3 font-bold">登録者一覧</div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="p-3">名前</th><th className="p-3">LINE表示名</th><th className="p-3">職業</th><th className="p-3">申込</th><th className="p-3">ステータス</th></tr></thead><tbody>{data.participants.map((p) => <tr key={p.id} className="border-t"><td className="p-3 font-medium">{p.name || '未登録'}</td><td className="p-3">{p.line_display_name || '—'}</td><td className="p-3">{p.occupation || '—'}</td><td className="p-3">{Number(p.booking_count || 0)}回</td><td className="p-3">{p.status || '—'}</td></tr>)}</tbody></table></div></div>}
       </section>}
@@ -341,7 +353,7 @@ function ArchiveTab({ data, accountId, refresh, flash, setError }: { data: Wahms
   </section>
 }
 
-function DeliveryTab({ data, accountId, eventOptions, refresh, flash, setError }: { data: WahmsOverview; accountId: string; eventOptions: WahmsOverview['applications']; refresh: () => Promise<void>; flash: (s: string) => void; setError: (s: string) => void }) {
+function DeliveryTab({ data, accountId, eventOptions, refresh, flash, setError }: { data: WahmsOverview; accountId: string; eventOptions: LectureOption[]; refresh: () => Promise<void>; flash: (s: string) => void; setError: (s: string) => void }) {
   const [event, setEvent] = useState('')
 
   // 開催日順に並べ替える。申込データは開催日の新しい順で来るが、配信は

@@ -2197,6 +2197,8 @@ export type WahmsOverview = {
   applications: Array<Record<string, unknown> & { id: string; participant_name?: string; school_name: string; event_date?: string; event_time?: string; theme?: string; attended?: number | null }>
   surveys: Array<Record<string, unknown> & { id: string; responded_at?: string; school_name: string; satisfaction?: number; value_rating?: string; next_intent?: string; question?: string; answer?: string; respondent_name?: string; response_status: 'none' | 'pending' | 'completed'; reply_skipped?: number }>
   archives: Array<Record<string, unknown> & { id: string; school_name: string; lecture_number?: string; theme?: string; held_on?: string; youtube_url?: string }>
+  // 開催予定 (events / event_slots)。申込が0件の日でも時間とテーマを出すために使う。
+  lectures: Array<{ school_name: string; event_date: string; start_time: string; end_time: string; lecture_label?: string; theme?: string }>
   deliveryLogs: Array<Record<string, unknown> & { id: string; delivery_type: string; title: string; success_count: number; failure_count: number; created_at: string }>
 }
 
