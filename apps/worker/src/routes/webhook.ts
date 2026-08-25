@@ -26,6 +26,8 @@ import type { HarnessProxyDispatch } from '../services/line-proxy-send.js';
 import { dispatchLineProxyLocally } from '../services/local-line-proxy.js';
 
 import { parseArchiveRequest, buildArchiveReply } from '../services/wahms-archive.js';
+import { parseBookingRequest, findLectureSlot, recordBooking } from '../services/wahms-booking.js';
+import { loadZoomSettings, bookingConfirmMessages } from '../services/wahms-messages.js';
 
 const webhook = new Hono<Env>();
 
@@ -204,6 +206,27 @@ webhook.post('/webhook', async (c) => {
   const answerArchiveLocally =
     archiveRequests.length > 0 && archiveRequests.length === body.events.length;
 
+  // 申込も Worker が返せるようにする。ただし「返せたときだけ」転送を止める。
+  //
+  // 初参加の人には Apps Script が初回アンケートへ案内する処理があり、終了済みの
+  // 回には終了の案内を返す。そこまで作り込むより、Worker が確実に扱える場合
+  // (リピーター × 開催予定にある回 × Zoom設定あり) だけ引き取り、それ以外は
+  // 従来どおり Apps Script に任せるほうが安全。
+  //
+  // 判定は返信の成否そのもの。Worker が返せなかったら転送するので、こちらの
+  // 不具合が「申し込んでも返事が来ない」になることがない。
+  const bookingRequests = legacyReplyOwner
+    ? body.events.filter(
+        (e) =>
+          e.type === 'message' &&
+          e.message?.type === 'text' &&
+          Boolean(parseBookingRequest(e.message.text)),
+      )
+    : [];
+  const attemptBookingLocally =
+    bookingRequests.length > 0 && bookingRequests.length === body.events.length;
+  const bookingReplied = { done: false };
+
   // 非同期処理 — LINE は ~1s 以内のレスポンスを要求
   const processingPromise = (async () => {
     const proxyDispatch: HarnessProxyDispatch = (request) =>
@@ -222,6 +245,8 @@ webhook.post('/webhook', async (c) => {
           proxyDispatch,
           legacyReplyOwner,
           answerArchiveLocally,
+          attemptBookingLocally,
+          bookingReplied,
         );
       } catch (err) {
         console.error('Error handling webhook event:', err);
@@ -243,8 +268,17 @@ webhook.post('/webhook', async (c) => {
     // 返してしまい、利用者に同じ一覧が2通届く。
     !answerArchiveLocally
   ) {
+    const legacyUrl = c.env.WAHMS_LEGACY_WEBHOOK_URL;
     c.executionCtx.waitUntil(
-      forwardToLegacyWebhook(c.env.WAHMS_LEGACY_WEBHOOK_URL, rawBody),
+      (async () => {
+        if (attemptBookingLocally) {
+          // 返信できたかが確定するまで待つ。replyToken は約1分有効なので、
+          // ここで待ってから転送しても Apps Script は返信できる。
+          await processingPromise;
+          if (bookingReplied.done) return;
+        }
+        await forwardToLegacyWebhook(legacyUrl, rawBody);
+      })(),
     );
   }
 
@@ -263,6 +297,8 @@ async function handleEvent(
   proxyDispatch?: HarnessProxyDispatch,
   legacyReplyOwner = false,
   answerArchiveLocally = false,
+  attemptBookingLocally = false,
+  bookingReplied: { done: boolean } = { done: false },
 ): Promise<void> {
   if (event.type === 'follow') {
     const userId =
@@ -608,6 +644,44 @@ async function handleEvent(
     // would race the established rich-menu / booking responses.
     if (legacyReplyOwner) {
       await upsertChatOnMessage(db, friend.id);
+
+      // 申込。確実に扱えるときだけ Worker が記録して返信する。返信できな
+      // かった場合は呼び出し元が Apps Script へ転送するので、利用者から見て
+      // 「申し込んだのに反応が無い」にはならない。
+      const booking = parseBookingRequest(incomingText);
+      const bookingUserId = event.source.userId;
+      if (booking && lineAccountId && bookingUserId && event.replyToken) {
+        try {
+          // 初参加の人は Apps Script が初回アンケートへ案内する。その導線を
+          // Worker はまだ持っていないので引き取らない。
+          const repeat = await db
+            .prepare(
+              `SELECT 1 AS ok FROM wahms_participants
+                WHERE line_account_id = ? AND line_user_id = ?
+                  AND survey_completed_at IS NOT NULL AND survey_completed_at <> ''`,
+            )
+            .bind(lineAccountId, bookingUserId)
+            .first<{ ok: number }>();
+          const slot = repeat ? await findLectureSlot(db, lineAccountId, booking) : null;
+          const zoom = slot ? await loadZoomSettings(db, lineAccountId) : null;
+          if (attemptBookingLocally && slot && zoom) {
+            await recordBooking(db, lineAccountId, bookingUserId, slot);
+            await lineClient.replyMessage(
+              event.replyToken,
+              bookingConfirmMessages(slot, zoom).map((text) => ({ type: 'text' as const, text })),
+            );
+            bookingReplied.done = true;
+            console.log(`[wahms-booking] replied ${slot.schoolName} ${slot.eventDate}`);
+          } else {
+            console.log(
+              `[wahms-booking] deferred to legacy (repeat=${Boolean(repeat)} slot=${Boolean(slot)} zoom=${Boolean(zoom)})`,
+            );
+          }
+        } catch (err) {
+          // ここで落ちても bookingReplied.done は false のままなので転送される。
+          console.error('[wahms-booking] takeover failed', err);
+        }
+      }
 
       // アーカイブ要求だけは Worker が D1 から返す。この webhook は Apps Script
       // へ転送していないので、replyToken を使うのはここだけになる。

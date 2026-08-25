@@ -53,6 +53,33 @@ function escapeHtml(value: string): string {
 type Lecture = { schoolName: string; eventDate: string; theme: string | null };
 
 /**
+ * 案内トークン。LINEで配信したアンケートを開いたときに使う。
+ *
+ * URLにはこの文字列しか載せない。LINEのユーザーIDを直接URLに置かないため。
+ * 誰がどの講義に答えたのかが確実に分かるので、講義名の取り違えが起きず、
+ * 質問への1対1返信もそのまま使える。
+ */
+type Invite = {
+  token: string;
+  lineUserId: string;
+  schoolName: string;
+  eventDate: string;
+  respondentName: string | null;
+};
+
+async function findInvite(db: D1Database, token: string): Promise<Invite | null> {
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(token)) return null;
+  return db
+    .prepare(
+      `SELECT token, line_user_id AS lineUserId, school_name AS schoolName,
+              event_date AS eventDate, respondent_name AS respondentName
+         FROM wahms_survey_invites WHERE token = ?`,
+    )
+    .bind(token)
+    .first<Invite>();
+}
+
+/**
  * 「その日に開催された講義」を返す。運営が講義ごとにURLを作り分けなくて済むよう、
  * 学校だけをURLに載せ、日付はサーバ側で当日のものを引く。
  */
@@ -125,13 +152,40 @@ button:disabled{background:#9ca3af}
 // 受講者に渡すURLは中立なドメイン (wahms.pages.dev) からプロキシする。
 // そのとき /wahms/survey だとパスが二重になるので、短い /survey でも同じ画面を出す。
 const makeSurveyFormHandler = (basePath: string) => async (c: Context<Env>) => {
-  const raw =
-    c.req.param('slug')?.trim() || c.req.query('school')?.trim() || c.req.query('s')?.trim() || '';
-  const school = raw ? resolveSchool(raw) : '';
   const accountId = await wahmsAccountId(c.env.DB);
   if (!accountId) return c.html(page(`<div class="card"><h1>アンケートを表示できません</h1><p class="sub">運営までお問い合わせください。</p></div>`), 500);
 
-  const lecture = school ? await findLecture(c.env.DB, accountId, school) : null;
+  // LINEから配信した案内。講義も回答者もトークンで確定する。
+  const token = c.req.query('t')?.trim() || '';
+  const invite = token ? await findInvite(c.env.DB, token) : null;
+  if (token && !invite) {
+    return c.html(
+      page(`<div class="card"><h1>この案内は使えません</h1>
+        <p class="sub">お手数ですが、運営までお問い合わせください。</p></div>`),
+      404,
+    );
+  }
+
+  const raw = invite
+    ? invite.schoolName
+    : (c.req.param('slug')?.trim() || c.req.query('school')?.trim() || c.req.query('s')?.trim() || '');
+  const school = raw ? resolveSchool(raw) : '';
+
+  const lecture = invite
+    ? await c.env.DB
+        .prepare(
+          `SELECT school_name AS schoolName,
+                  SUBSTR(REPLACE(event_date, '/', '-'), 1, 10) AS eventDate,
+                  theme
+             FROM wahms_applications
+            WHERE line_account_id = ? AND school_name = ?
+              AND SUBSTR(REPLACE(event_date, '/', '-'), 1, 10) = ?
+            LIMIT 1`,
+        )
+        .bind(accountId, invite.schoolName, invite.eventDate)
+        .first<Lecture>()
+      ?? { schoolName: invite.schoolName, eventDate: invite.eventDate, theme: null }
+    : school ? await findLecture(c.env.DB, accountId, school) : null;
   if (!lecture) {
     return c.html(
       page(`<div class="card"><h1>講義が見つかりません</h1>
@@ -152,9 +206,10 @@ const makeSurveyFormHandler = (basePath: string) => async (c: Context<Env>) => {
   <form id="f">
     <input type="hidden" name="school" value="${escapeHtml(lecture.schoolName)}">
     <input type="hidden" name="eventDate" value="${escapeHtml(lecture.eventDate)}">
+    ${invite ? `<input type="hidden" name="token" value="${escapeHtml(invite.token)}">` : ''}
 
     <p class="q">お名前<span class="req">必須</span></p>
-    <input type="text" name="name" required maxlength="60" placeholder="山田 太郎">
+    <input type="text" name="name" required maxlength="60" placeholder="山田 太郎" value="${escapeHtml(invite?.respondentName ?? '')}">
 
     <p class="q">本日の講義の満足度<span class="req">必須</span></p>
     <div class="stars">${[1, 2, 3, 4, 5]
@@ -214,7 +269,7 @@ publicSurvey.get('/wahms/survey/:slug', makeSurveyFormHandler('/wahms/survey'));
 
 publicSurvey.post('/api/public/wahms-survey', async (c) => {
   type SurveyBody = {
-    school?: string; eventDate?: string; name?: string;
+    school?: string; eventDate?: string; name?: string; token?: string;
     satisfaction?: string; valueRating?: string; nextIntent?: string; question?: string;
   };
   const body: SurveyBody = await c.req.json<SurveyBody>().catch(() => ({} as SurveyBody));
@@ -240,9 +295,21 @@ publicSurvey.post('/api/public/wahms-survey', async (c) => {
   const accountId = await wahmsAccountId(c.env.DB);
   if (!accountId) return c.json({ success: false, error: '送信できませんでした' }, 500);
 
-  // 実在する講義かを確認する。任意の学校名を投げ込まれても保存しない。
+  // LINEから配信した案内なら、その人の回答として記録する。誰の回答かが
+  // 分かるので、質問への1対1返信がそのまま使える。
+  const invite = body.token ? await findInvite(c.env.DB, body.token.trim()) : null;
+  if (body.token && !invite) {
+    return c.json({ success: false, error: 'この案内は使えません' }, 400);
+  }
+  const respondentId = invite ? invite.lineUserId : `web-${crypto.randomUUID()}`;
+
+  // 講義の特定。案内トークンがあれば、そこに書かれた講義で確定する。
+  // 「今日に一番近い回」で引くと、配信から数日後に回答されたときに
+  // 別の回の集計へ入ってしまう。
   const named = resolveSchool(school);
-  const lecture = await findLecture(c.env.DB, accountId, named.replace(/^\S+\s*/, '').trim() || named);
+  const lecture: Lecture | null = invite
+    ? { schoolName: invite.schoolName, eventDate: invite.eventDate, theme: null }
+    : await findLecture(c.env.DB, accountId, named.replace(/^\S+\s*/, '').trim() || named);
   if (!lecture) return c.json({ success: false, error: '講義を特定できませんでした' }, 400);
 
   const question = body.question?.trim() || null;
@@ -254,7 +321,7 @@ publicSurvey.post('/api/public/wahms-survey', async (c) => {
   ).bind(
     crypto.randomUUID(),
     accountId,
-    `web-${crypto.randomUUID()}`,
+    respondentId,
     `${lecture.schoolName}_${lecture.eventDate}`,
     lecture.schoolName,
     satisfaction,
@@ -264,6 +331,11 @@ publicSurvey.post('/api/public/wahms-survey', async (c) => {
     name,
     question ? 'pending' : 'none',
   ).run();
+
+  if (invite) {
+    await c.env.DB.prepare(`UPDATE wahms_survey_invites SET used_at = datetime('now', '+9 hours'), respondent_name = ? WHERE token = ?`)
+      .bind(name, invite.token).run();
+  }
 
   return c.json({ success: true });
 });

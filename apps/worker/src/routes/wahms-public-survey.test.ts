@@ -13,7 +13,15 @@ const LECTURE = {
 
 type Insert = { sql: string; args: unknown[] };
 
-function fakeDb(inserts: Insert[], { lectureFound = true } = {}) {
+const INVITE = {
+  token: 'tok_abcdefghijklmnop',
+  lineUserId: 'U0c545075e7660d98ea5ec20178a9c935',
+  schoolName: '📈 マネジメント学校',
+  eventDate: '2026-08-21',
+  respondentName: null,
+};
+
+function fakeDb(inserts: Insert[], { lectureFound = true, invite = false } = {}) {
   return {
     prepare(sql: string) {
       const run = async () => ({ success: true });
@@ -23,6 +31,7 @@ function fakeDb(inserts: Insert[], { lectureFound = true } = {}) {
           return {
             first: async () => {
               if (sql.includes('FROM line_accounts')) return { id: 'wahms-account' };
+              if (sql.includes('FROM wahms_survey_invites')) return invite ? INVITE : null;
               if (sql.includes('FROM wahms_applications')) return lectureFound ? LECTURE : null;
               return null;
             },
@@ -185,6 +194,56 @@ describe('回答の保存', () => {
   test('実在しない講義には保存しない', async () => {
     const inserts: Insert[] = [];
     const res = await post(VALID, fakeDb(inserts, { lectureFound: false }));
+    expect(res.status).toBe(400);
+    expect(inserts).toHaveLength(0);
+  });
+});
+
+// ─── LINEから配信した案内 ───────────────────────────────────
+// Apps Script の LIFF は講義名を「読み込み中」のまま保存していた。
+// 案内トークンで講義と回答者を確定させ、同じことが起きないようにする。
+
+describe('案内トークン', () => {
+  test('トークンで開くとその講義のフォームが出る', async () => {
+    const res = await get(`/survey?t=${INVITE.token}`, fakeDb([], { invite: true }));
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('📈 マネジメント学校');
+    expect(html).toContain(`name="token" value="${INVITE.token}"`);
+  });
+
+  test('知らないトークンは開けない', async () => {
+    const res = await get('/survey?t=tok_unknownunknownun', fakeDb([], { invite: false }));
+    expect(res.status).toBe(404);
+  });
+
+  test('案内に書かれた講義として記録する', async () => {
+    // 「今日に一番近い回」で引くと、配信の数日後に回答されたときに
+    // 別の回の集計へ入る。実際に 8/21 の回答が 8/28 として保存された。
+    const inserts: Insert[] = [];
+    await post({ ...VALID, token: INVITE.token }, fakeDb(inserts, { invite: true }));
+    expect(inserts[0].args[3]).toBe('📈 マネジメント学校_2026-08-21');
+    expect(inserts[0].args[4]).toBe('📈 マネジメント学校');
+  });
+
+  test('LINEの回答として保存する（web-始まりにしない）', async () => {
+    // 誰の回答かが分かるので、質問への1対1返信がそのまま使える。
+    const inserts: Insert[] = [];
+    const res = await post({ ...VALID, token: INVITE.token }, fakeDb(inserts, { invite: true }));
+    expect(res.status).toBe(200);
+    expect(inserts[0].args[2]).toBe(INVITE.lineUserId);
+    expect(String(inserts[0].args[2])).not.toMatch(/^web-/);
+  });
+
+  test('トークン無しの回答は今までどおりWeb回答として入る', async () => {
+    const inserts: Insert[] = [];
+    await post(VALID, fakeDb(inserts));
+    expect(String(inserts[0].args[2])).toMatch(/^web-/);
+  });
+
+  test('偽のトークンでは保存しない', async () => {
+    const inserts: Insert[] = [];
+    const res = await post({ ...VALID, token: 'tok_forgedforgedforg' }, fakeDb(inserts, { invite: false }));
     expect(res.status).toBe(400);
     expect(inserts).toHaveLength(0);
   });

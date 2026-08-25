@@ -10,7 +10,16 @@ type WahmsAccount = {
   channel_id: string;
 };
 
-const SURVEY_LIFF_URL = 'https://liff.line.me/2010052458-oPl4GiQQ';
+// Apps Script の LIFF アンケート。講義名を「読み込み中」のまま保存する不具合が
+// あり、2026-08-20以降の回答5件がどの講義のものか分からなくなっていた。
+// 受講者ごとの案内トークンを使う自前のフォームへ切り替えたので、もう使わない。
+const SURVEY_FORM_BASE_KEY = 'wahms_survey_form_url';
+
+/** 案内トークン。URLに載るのはこれだけで、LINEのユーザーIDは出さない。 */
+function inviteToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 
 const TEST_RECIPIENT_PATTERN = /^U[0-9a-f]{32}$/i;
 
@@ -45,13 +54,6 @@ function bearerToken(header: string | undefined): string | null {
 function normalizeDate(value: string | null): string {
   if (!value) return '';
   return value.slice(0, 10).replaceAll('/', '-');
-}
-
-function schoolKey(schoolName: string, eventDate: string): string {
-  const date = new Date(`${normalizeDate(eventDate)}T00:00:00+09:00`);
-  if (Number.isNaN(date.getTime())) return schoolName;
-  const plainName = schoolName.replace(/^\S+\s*/, '').trim();
-  return `${date.getMonth() + 1}月${date.getDate()}日${plainName}に申し込む`;
 }
 
 async function requireWahmsAccount(c: Context<Env>) {
@@ -265,15 +267,27 @@ wahms.post('/api/wahms/survey-deliveries', async (c) => {
     : (targets.results || []).map((row) => row.line_user_id).filter(Boolean);
   if (!ids.length) return c.json({ success: false, error: 'この講義の申込者が見つかりません' }, 400);
 
-  const key = schoolKey(schoolName, eventDate);
-  const text = `【 ${schoolName}】\nご参加いただき、ありがとうございます。\n講義アンケートのご協力をお願いします。\n\n回答目安：60〜90秒\n\n${SURVEY_LIFF_URL}?s=${encodeURIComponent(key)}`;
+  const base = await c.env.DB
+    .prepare(`SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?`)
+    .bind(scope.account.id, SURVEY_FORM_BASE_KEY)
+    .first<{ value: string }>();
+  if (!base?.value) {
+    return c.json({ success: false, error: 'アンケートフォームのURLが未設定です' }, 400);
+  }
+
+  // 受講者ごとに使い捨ての案内を作る。誰がどの講義に答えたかが確定するので、
+  // 講義名の取り違えが起きず、質問への1対1返信もそのまま使える。
   let success = 0;
   let failure = 0;
-  for (let i = 0; i < ids.length; i += 500) {
-    const chunk = ids.slice(i, i + 500);
-    const response = await proxySend(c, scope.account.id, 'multicast', { to: chunk, messages: [{ type: 'text', text }] });
-    if (response.ok) success += chunk.length;
-    else failure += chunk.length;
+  for (const lineUserId of ids) {
+    const token = inviteToken();
+    await c.env.DB.prepare(
+      `INSERT INTO wahms_survey_invites (token, line_account_id, line_user_id, school_name, event_date) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(token, scope.account.id, lineUserId, schoolName, eventDate).run();
+    const text = `【 ${schoolName}】\nご参加いただき、ありがとうございます。\n講義アンケートのご協力をお願いします。\n\n回答目安：60〜90秒\n\n${base.value}?t=${token}`;
+    const response = await proxySend(c, scope.account.id, 'push', { to: lineUserId, messages: [{ type: 'text', text }] });
+    if (response.ok) success += 1;
+    else failure += 1;
   }
   await c.env.DB.prepare(`INSERT INTO wahms_delivery_logs (id, line_account_id, delivery_type, title, target_count, success_count, failure_count, created_by) VALUES (?, ?, 'survey', ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), scope.account.id, `${schoolName} ${eventDate}`, ids.length, success, failure, c.get('staff')?.name || '担当者').run();
   return c.json({ success: failure === 0, data: { targetCount: ids.length, success, failure } });

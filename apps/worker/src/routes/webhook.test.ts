@@ -314,6 +314,111 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
     fetchSpy.mockRestore();
   });
 
+  // ─── 申込の引き取り ───────────────────────────────────────────
+  // Worker が確実に扱えるときだけ返信し、それ以外は Apps Script へ渡す。
+  // 「返せなかったのに転送もしない」が起きると、申し込んだ人に何も届かない。
+
+  function bookingDb({ repeat = true, slot = true, zoom = true } = {}) {
+    const SLOT = {
+      slotId: 'slot-1', eventId: 'ev-1', schoolName: '🔥 マーケティング学校',
+      eventDate: '2026-08-25', startTime: '20:30', endTime: '22:00',
+      lectureLabel: '第13回', theme: '安売りは、本当に「負け」なのか？',
+    };
+    const make = (sql: string) => ({
+      run: async () => ({ success: true }),
+      first: async () => {
+        if (sql.includes('FROM wahms_participants')) return repeat ? { ok: 1 } : null;
+        if (sql.includes('FROM event_slots')) return slot ? SLOT : null;
+        if (sql.includes('FROM friends')) return { id: 'friend-1' };
+        if (sql.includes('FROM wahms_applications')) return null;
+        if (sql.includes('FROM event_bookings')) return null;
+        return null;
+      },
+      all: async () => ({
+        results: sql.includes('FROM account_settings') && zoom
+          ? [
+              { key: 'wahms_zoom_url', value: 'https://zoom.test/j/1' },
+              { key: 'wahms_zoom_id', value: '4891469109' },
+              { key: 'wahms_zoom_password', value: 'whams' },
+            ]
+          : [],
+      }),
+    });
+    return { prepare: (sql: string) => ({ bind: () => make(sql), ...make(sql) }) };
+  }
+
+  async function postBooking(text: string, db: unknown, fetchSpy: { mock: { calls: unknown[][] } }) {
+    const executionCtx = { waitUntil: vi.fn(), passThroughOnException: vi.fn(), props: {} } as unknown as ExecutionContext;
+    const res = await setupApp().request(
+      '/webhook',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Line-Signature': 'A'.repeat(43) + '=' },
+        body: JSON.stringify({ destination: 'wahms', events: [textEvent(text)] }),
+      },
+      { ...wahmsEnv(), DB: db },
+      executionCtx,
+    );
+    for (const call of vi.mocked(executionCtx.waitUntil).mock.calls) {
+      await (call[0] as Promise<unknown>).catch(() => {});
+    }
+    return { res, forwarded: fetchSpy.mock.calls.some((c) => String(c[0]).includes('script.google.test')) };
+  }
+
+  test('リピーターの申込は Worker が返し、転送しない', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await postBooking('8月25日マーケティング学校に申し込む', bookingDb(), fetchSpy);
+    expect(forwarded).toBe(false);
+    expect(lineClientMocks.replyMessage).toHaveBeenCalledTimes(1);
+    const [, messages] = lineClientMocks.replyMessage.mock.calls[0];
+    expect(messages[0].text).toBe('✅ お申し込みが完了しました');
+    expect(messages[1].text).toContain('🔥 マーケティング学校');
+    expect(messages[1].text).toContain('8月25日（火）20:30〜22:00');
+    expect(messages[1].text).toContain('https://zoom.test/j/1');
+    fetchSpy.mockRestore();
+  });
+
+  test('初参加の人は Apps Script に任せる（初回アンケートの案内があるため）', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await postBooking('8月25日マーケティング学校に申し込む', bookingDb({ repeat: false }), fetchSpy);
+    expect(forwarded).toBe(true);
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  test('開催予定に無い回は Apps Script に任せる（終了済みの案内があるため）', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await postBooking('5月12日マーケティング学校に申し込む', bookingDb({ slot: false }), fetchSpy);
+    expect(forwarded).toBe(true);
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  test('Zoom設定が無ければ Apps Script に任せる（URLの無い案内を送らない）', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await postBooking('8月25日マーケティング学校に申し込む', bookingDb({ zoom: false }), fetchSpy);
+    expect(forwarded).toBe(true);
+    fetchSpy.mockRestore();
+  });
+
+  test('返信に失敗したら転送する（申し込んだのに無反応を作らない）', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    lineClientMocks.replyMessage.mockRejectedValueOnce(new Error('LINE API down'));
+    const { forwarded } = await postBooking('8月25日マーケティング学校に申し込む', bookingDb(), fetchSpy);
+    expect(forwarded).toBe(true);
+    fetchSpy.mockRestore();
+  });
+
   test('mirrors a signed WAHMS payload to the existing Apps Script endpoint', async () => {
     vi.mocked(verifySignature).mockResolvedValue(true);
     vi.mocked(getLineAccounts).mockResolvedValue([
