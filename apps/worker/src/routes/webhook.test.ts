@@ -390,6 +390,34 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
     fetchSpy.mockRestore();
   });
 
+  test('返信を任せた場合でも、申込は必ずこちらに記録する', async () => {
+    // 当日はじめて友だち追加した人の申込が管理画面に出ず、講義当日に
+    // 3件取りこぼした (2026-08-26 WEB学校)。記録と返信は別の話なので、
+    // 返信を Apps Script に任せても記録は残す。
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const calls: string[] = [];
+    const db = bookingDb({ repeat: false });
+    const orig = db.prepare.bind(db);
+    (db as { prepare: (sql: string) => unknown }).prepare = (sql: string) => { calls.push(sql); return orig(sql) };
+    await postBooking('8月25日マーケティング学校に申し込む', db, fetchSpy);
+    expect(calls.some((c) => c.includes('INSERT INTO wahms_applications'))).toBe(true);
+    fetchSpy.mockRestore();
+  });
+
+  test('開催予定に無い回は記録もしない', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const calls: string[] = [];
+    const db = bookingDb({ slot: false });
+    const orig = db.prepare.bind(db);
+    (db as { prepare: (sql: string) => unknown }).prepare = (sql: string) => { calls.push(sql); return orig(sql) };
+    const { forwarded } = await postBooking('5月12日マーケティング学校に申し込む', db, fetchSpy);
+    expect(forwarded).toBe(true);
+    expect(calls.some((c) => c.includes('INSERT INTO wahms_applications'))).toBe(false);
+    fetchSpy.mockRestore();
+  });
+
   test('開催予定に無い回は Apps Script に任せる（終了済みの案内があるため）', async () => {
     wahmsAccounts();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));

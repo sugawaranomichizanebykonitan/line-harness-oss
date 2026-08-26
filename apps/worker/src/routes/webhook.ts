@@ -654,6 +654,20 @@ async function handleEvent(
         try {
           // 初参加の人は Apps Script が初回アンケートへ案内する。その導線を
           // Worker はまだ持っていないので引き取らない。
+          const slot = await findLectureSlot(db, lineAccountId, booking);
+
+          // 返信を Apps Script に任せる場合でも、記録だけは必ずこちらで持つ。
+          // 以前は引き取れたときだけ記録しており、当日はじめて友だち追加した
+          // 人の申込が管理画面に出なかった (2026-08-26 のWEB学校で3件)。
+          // 記録と返信は別の話なので、条件を分ける。
+          if (slot) {
+            await recordBooking(db, lineAccountId, bookingUserId, slot);
+          } else {
+            console.warn(`[wahms-booking] slot not found: ${incomingText}`);
+          }
+
+          // 初参加の人は Apps Script が初回アンケートへ案内する。その導線を
+          // Worker はまだ持っていないので、返信は引き取らない。
           const repeat = await db
             .prepare(
               `SELECT 1 AS ok FROM wahms_participants
@@ -662,10 +676,8 @@ async function handleEvent(
             )
             .bind(lineAccountId, bookingUserId)
             .first<{ ok: number }>();
-          const slot = repeat ? await findLectureSlot(db, lineAccountId, booking) : null;
-          const zoom = slot ? await loadZoomSettings(db, lineAccountId) : null;
-          if (attemptBookingLocally && slot && zoom) {
-            await recordBooking(db, lineAccountId, bookingUserId, slot);
+          const zoom = repeat && slot ? await loadZoomSettings(db, lineAccountId) : null;
+          if (attemptBookingLocally && repeat && slot && zoom) {
             await lineClient.replyMessage(
               event.replyToken,
               bookingConfirmMessages(slot, zoom).map((text) => ({ type: 'text' as const, text })),
@@ -674,7 +686,7 @@ async function handleEvent(
             console.log(`[wahms-booking] replied ${slot.schoolName} ${slot.eventDate}`);
           } else {
             console.log(
-              `[wahms-booking] deferred to legacy (repeat=${Boolean(repeat)} slot=${Boolean(slot)} zoom=${Boolean(zoom)})`,
+              `[wahms-booking] recorded, reply deferred to legacy (repeat=${Boolean(repeat)} slot=${Boolean(slot)} zoom=${Boolean(zoom)})`,
             );
           }
         } catch (err) {
