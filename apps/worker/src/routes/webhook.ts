@@ -28,6 +28,7 @@ import { dispatchLineProxyLocally } from '../services/local-line-proxy.js';
 import { parseArchiveRequest, buildArchiveReply } from '../services/wahms-archive.js';
 import { parseBookingRequest, findLectureSlot, recordBooking } from '../services/wahms-booking.js';
 import { loadZoomSettings, bookingConfirmMessages } from '../services/wahms-messages.js';
+import { ensureWahmsParticipant } from '../services/wahms-participant.js';
 
 const webhook = new Hono<Env>();
 
@@ -331,6 +332,16 @@ async function handleEvent(
       await db.prepare('UPDATE friends SET line_account_id = ?, updated_at = ? WHERE id = ?')
         .bind(lineAccountId, jstNow(), friend.id).run();
       console.log(`[follow] line_account_id set to ${lineAccountId} for friend ${friend.id}`);
+    }
+
+    // WAHMS の登録者マスターにも同時に作る。Apps Script の同期を待たない。
+    if (legacyReplyOwner && lineAccountId) {
+      try {
+        const r = await ensureWahmsParticipant(db, lineAccountId, userId, profile?.displayName ?? null);
+        console.log(`[wahms-participant] ${r} ${userId}`);
+      } catch (err) {
+        console.error('[wahms-participant] failed', err);
+      }
     }
 
     // 新規・再フォローのどちらでも、最初の友だち登録マイルを同じキーで非同期投入する。
