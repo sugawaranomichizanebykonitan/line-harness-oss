@@ -55,6 +55,17 @@ function timeRange(slot: LectureSlot): string {
   return `${slot.startTime}〜${slot.endTime}`;
 }
 
+/**
+ * テーマ行。テーマの無い学校では行ごと省く。
+ *
+ * 青山塾は第11回から「何でも相談OK」になりテーマを設けていない。
+ * 空文字のまま組み立てると『』や「🎓 」だけの行が残り、壊れて見える。
+ */
+function themeLine(theme: string | null, wrap: (t: string) => string): string {
+  const value = theme?.trim();
+  return value ? `${wrap(value)}\n` : '';
+}
+
 /** 申込完了。2通に分けるのも既存に合わせている。 */
 export function bookingConfirmMessages(slot: LectureSlot, zoom: ZoomSettings): string[] {
   return [
@@ -64,7 +75,7 @@ export function bookingConfirmMessages(slot: LectureSlot, zoom: ZoomSettings): s
       `《 ${slot.schoolName} 》\n` +
       `日時：${japaneseDate(slot.eventDate)}${timeRange(slot)}\n` +
       'オンラインzoom開催\n' +
-      `『${slot.theme ?? ''}』\n` +
+      themeLine(slot.theme, (t) => `『${t}』`) +
       ' スマホ、顔出しなしでもOK\n' +
       '_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/\n' +
       '🔷ZOOM参加URL\n' +
@@ -84,7 +95,7 @@ export function morningReminderMessages(slot: LectureSlot, zoom: ZoomSettings): 
       '下記Zoom URLよりご参加くださいませ👇',
     '━━━━━━━━━━━━━\n' +
       `📅 本日 ${timeRange(slot)}\n` +
-      `🎓 ${slot.theme ?? ''}\n` +
+      themeLine(slot.theme, (t) => `🎓 ${t}`) +
       '━━━━━━━━━━━━━\n\n' +
       '▼ 下のZOOM URLをタップして参加 ▼\n\n' +
       `${zoom.url}\n\n` +
@@ -104,7 +115,7 @@ export function preLectureReminderMessages(slot: LectureSlot, zoom: ZoomSettings
       'あと30分です✨',
     '━━━━━━━━━━━━━\n' +
       `📅 本日 ${timeRange(slot)}\n` +
-      `🎓 ${slot.theme ?? ''}\n` +
+      themeLine(slot.theme, (t) => `🎓 ${t}`) +
       '━━━━━━━━━━━━━\n\n' +
       '▼ 下のZOOM URLをタップして参加 ▼\n\n' +
       `${zoom.url}\n\n` +

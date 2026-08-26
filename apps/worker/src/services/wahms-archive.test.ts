@@ -56,6 +56,20 @@ describe('アーカイブ応答の組み立て', () => {
     expect(text).toContain('5/12');
   });
 
+  test('テーマの無い学校でも空行を作らない', async () => {
+    // 青山塾は第11回から「何でも相談OK」になりテーマを設けていない。
+    // テーマ欄を無条件に挟むと、回とURLの間に空行が入って読みにくくなる。
+    const rows = [
+      { school_name: '☕ 青山塾', lecture_number: '11.0', theme: null, held_on: '2026-07-29T00:00:00', youtube_url: 'https://youtu.be/x' },
+      { school_name: '☕ 青山塾', lecture_number: '12.0', theme: '', held_on: '2026-08-19T00:00:00', youtube_url: 'https://youtu.be/y' },
+    ];
+    const text = (await buildArchiveReply(fakeDb(rows), 'acc', '青山塾'))!;
+    expect(text).toContain('☕ 青山塾 アーカイブ（2本）');
+    expect(text).toContain('第11回  7/29\nhttps://youtu.be/x');
+    expect(text).toContain('第12回  8/19\nhttps://youtu.be/y');
+    expect(text).not.toContain('\n\n\n');
+  });
+
   test('公開済みが1本も無ければ、その旨を返す', async () => {
     const text = await buildArchiveReply(fakeDb([ROWS[2]]), 'acc', 'マーケティング学校');
     expect(text).toContain('まだ公開中のアーカイブがありません');
