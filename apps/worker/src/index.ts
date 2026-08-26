@@ -17,6 +17,7 @@ import {
 import { processStepDeliveries } from './services/step-delivery.js';
 import { processScheduledBroadcasts, processQueuedBroadcasts } from './services/broadcast.js';
 import { processReminderDeliveries } from './services/reminder-delivery.js';
+import { sendWahmsReminders } from './services/wahms-reminders.js';
 import { checkAccountHealth } from './services/ban-monitor.js';
 import { refreshLineAccessTokens } from './services/token-refresh.js';
 import { processInsightFetch } from './services/insight-fetcher.js';
@@ -89,6 +90,7 @@ import adminVersion from './routes/admin-version.js';
 import adminUpdate from './routes/admin-update.js';
 import { mediaInquiries } from './routes/media-inquiries.js';
 import { wahms } from './routes/wahms.js';
+import { publicSurvey } from './routes/wahms-public-survey.js';
 import { isLinkPreviewBot } from './lib/og-bot.js';
 import { buildOgHtml } from './lib/og-html.js';
 import {
@@ -212,6 +214,7 @@ app.route('/', liffRoutes);
 app.route('/', affiliateSelfRoutes);
 app.route('/', mediaInquiries);
 app.route('/', wahms);
+app.route('/', publicSurvey);
 
 // Mount route groups — Round 3
 app.route('/', webhooks);
@@ -1045,6 +1048,18 @@ async function scheduled(
   );
   jobs.push(processQueuedBroadcasts(env.DB, defaultLineClient, env.WORKER_URL));
   jobs.push(checkAccountHealth(env.DB));
+
+  // WAHMS 講義のリマインド。Worker が引き取った申込だけが対象で、
+  // スプレッドシート由来の申込は従来どおり Apps Script が送る。
+  jobs.push(
+    sendWahmsReminders(env.DB)
+      .then((r) => {
+        if (r.morning + r.pre + r.failed > 0) {
+          console.log(`[wahms-reminder] morning=${r.morning} pre=${r.pre} failed=${r.failed}`);
+        }
+      })
+      .catch((e) => console.error('wahms-reminder error:', e)),
+  );
 
   // Mileage is an eventually-consistent projection. Reuse the existing
   // minute cron invocation, but drain only every five minutes and at most 100

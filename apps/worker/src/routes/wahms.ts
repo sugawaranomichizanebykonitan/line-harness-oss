@@ -10,7 +10,16 @@ type WahmsAccount = {
   channel_id: string;
 };
 
-const SURVEY_LIFF_URL = 'https://liff.line.me/2010052458-oPl4GiQQ';
+// Apps Script の LIFF アンケート。講義名を「読み込み中」のまま保存する不具合が
+// あり、2026-08-20以降の回答5件がどの講義のものか分からなくなっていた。
+// 受講者ごとの案内トークンを使う自前のフォームへ切り替えたので、もう使わない。
+const SURVEY_FORM_BASE_KEY = 'wahms_survey_form_url';
+
+/** 案内トークン。URLに載るのはこれだけで、LINEのユーザーIDは出さない。 */
+function inviteToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 
 const TEST_RECIPIENT_PATTERN = /^U[0-9a-f]{32}$/i;
 
@@ -45,13 +54,6 @@ function bearerToken(header: string | undefined): string | null {
 function normalizeDate(value: string | null): string {
   if (!value) return '';
   return value.slice(0, 10).replaceAll('/', '-');
-}
-
-function schoolKey(schoolName: string, eventDate: string): string {
-  const date = new Date(`${normalizeDate(eventDate)}T00:00:00+09:00`);
-  if (Number.isNaN(date.getTime())) return schoolName;
-  const plainName = schoolName.replace(/^\S+\s*/, '').trim();
-  return `${date.getMonth() + 1}月${date.getDate()}日${plainName}に申し込む`;
 }
 
 async function requireWahmsAccount(c: Context<Env>) {
@@ -139,11 +141,11 @@ wahms.get('/api/wahms/overview', async (c) => {
   const schoolClause = school ? ' AND school_name = ?' : '';
   const schoolArgs = school ? [accountId, school] : [accountId];
 
-  const [participantCount, applicationCount, surveyStats, pendingCount, schoolRows, participants, applications, surveys, archives, logs] = await Promise.all([
+  const [participantCount, applicationCount, surveyStats, pendingCount, schoolRows, participants, applications, surveys, archives, logs, lectures] = await Promise.all([
     c.env.DB.prepare('SELECT COUNT(*) AS count FROM wahms_participants WHERE line_account_id = ?').bind(accountId).first<{ count: number }>(),
     c.env.DB.prepare(`SELECT COUNT(*) AS count FROM wahms_applications WHERE line_account_id = ?${schoolClause}`).bind(...schoolArgs).first<{ count: number }>(),
     c.env.DB.prepare(`SELECT COUNT(*) AS count, AVG(satisfaction) AS average, SUM(CASE WHEN value_rating = '無料なのが信じられない' THEN 1 ELSE 0 END) AS unbelievable FROM wahms_survey_responses WHERE line_account_id = ?${schoolClause}`).bind(...schoolArgs).first<{ count: number; average: number | null; unbelievable: number }>(),
-    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM wahms_survey_responses WHERE line_account_id = ? AND response_status = 'pending'${schoolClause}`).bind(...schoolArgs).first<{ count: number }>(),
+    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM wahms_survey_responses WHERE line_account_id = ? AND response_status = 'pending' AND reply_skipped = 0${schoolClause}`).bind(...schoolArgs).first<{ count: number }>(),
     c.env.DB.prepare(`SELECT school_name, MAX(event_date) AS latest_date, COUNT(*) AS application_count FROM wahms_applications WHERE line_account_id = ? GROUP BY school_name ORDER BY latest_date DESC`).bind(accountId).all(),
     c.env.DB.prepare(`SELECT p.*, (SELECT COUNT(*) FROM wahms_applications a WHERE a.line_account_id = p.line_account_id AND a.line_user_id = p.line_user_id) AS booking_count FROM wahms_participants p WHERE p.line_account_id = ? AND (? = '' OR p.name LIKE ? OR p.line_display_name LIKE ? OR p.occupation LIKE ?) ORDER BY p.updated_at DESC LIMIT 500`).bind(accountId, search, `%${search}%`, `%${search}%`, `%${search}%`).all(),
     c.env.DB.prepare(`SELECT a.*, COALESCE(p.name, p.line_display_name) AS participant_name FROM wahms_applications a LEFT JOIN wahms_participants p ON p.line_account_id = a.line_account_id AND p.line_user_id = a.line_user_id WHERE a.line_account_id = ?${schoolClause} ORDER BY a.event_date DESC, a.applied_at DESC LIMIT 1000`).bind(...schoolArgs).all(),
@@ -152,6 +154,20 @@ wahms.get('/api/wahms/overview', async (c) => {
     // アーカイブ画面側に独立した学校の絞り込みがあり、そちらで切り替える。
     c.env.DB.prepare(`SELECT * FROM wahms_archives WHERE line_account_id = ? ORDER BY school_name, CAST(lecture_number AS REAL), source_row LIMIT 1000`).bind(accountId).all(),
     c.env.DB.prepare(`SELECT * FROM wahms_delivery_logs WHERE line_account_id = ? ORDER BY created_at DESC LIMIT 30`).bind(accountId).all(),
+    // 開催予定。申込が1件も無い日でも、何時に何をやるのかを画面に出すため。
+    // starts_at はUTCなので、+9時間してJSTの日付と時刻に直して返す。
+    c.env.DB.prepare(
+      `SELECT e.name AS school_name,
+              DATE(s.starts_at, '+9 hours') AS event_date,
+              TIME(s.starts_at, '+9 hours') AS start_time,
+              TIME(s.ends_at, '+9 hours') AS end_time,
+              s.sequence_label AS lecture_label,
+              s.title AS theme
+         FROM event_slots s
+         JOIN events e ON e.id = s.event_id
+        WHERE e.line_account_id = ? AND s.deleted_at IS NULL AND s.is_active = 1
+        ORDER BY s.starts_at`,
+    ).bind(accountId).all(),
   ]);
 
   const count = Number(surveyStats?.count || 0);
@@ -171,6 +187,7 @@ wahms.get('/api/wahms/overview', async (c) => {
     surveys: surveys.results,
     archives: archives.results,
     deliveryLogs: logs.results,
+    lectures: lectures.results,
   }});
 });
 
@@ -184,6 +201,14 @@ wahms.post('/api/wahms/surveys/:id/reply', async (c) => {
     'SELECT id, line_user_id, question FROM wahms_survey_responses WHERE id = ? AND line_account_id = ?',
   ).bind(c.req.param('id'), scope.account.id).first<{ id: string; line_user_id: string; question: string | null }>();
   if (!survey) return c.json({ success: false, error: '回答が見つかりません' }, 404);
+  // Web版アンケート (LINE未登録の受講者) は送信先が無い。LINE送信を試みても
+  // 必ず失敗するので、理由が分かる形で止める。
+  if (survey.line_user_id.startsWith('web-')) {
+    return c.json(
+      { success: false, error: 'Web回答のため、LINEで返信できません。別の手段でご連絡ください' },
+      400,
+    );
+  }
 
   const message = survey.question
     ? `青山さんへのご質問に回答します。\n\n【ご質問】\n${survey.question}\n\n【回答】\n${answer}`
@@ -199,6 +224,30 @@ wahms.post('/api/wahms/surveys/:id/reply', async (c) => {
     `UPDATE wahms_survey_responses SET answer = ?, response_status = 'completed', answered_at = datetime('now'), answered_by = ?, updated_at = datetime('now') WHERE id = ?`,
   ).bind(answer, staff?.name || '担当者', survey.id).run();
   return c.json({ success: true, data: { id: survey.id, status: 'completed' } });
+});
+
+/**
+ * 「返信対応しない」。返信するほどでもない質問を要対応リストから外す。
+ *
+ * 回答そのものは消さない。集計には残したまま、対応の要否だけを落とす。
+ * LINEへは何も送らない (送らないことが目的の操作なので)。
+ */
+wahms.post('/api/wahms/surveys/:id/skip', async (c) => {
+  const scope = await requireWahmsAccount(c);
+  if ('error' in scope) return scope.error;
+  const survey = await c.env.DB.prepare(
+    'SELECT id, response_status FROM wahms_survey_responses WHERE id = ? AND line_account_id = ?',
+  ).bind(c.req.param('id'), scope.account.id).first<{ id: string; response_status: string }>();
+  if (!survey) return c.json({ success: false, error: '回答が見つかりません' }, 404);
+  // 返信済みを取り消す操作ではない。履歴を消さないよう手前で止める。
+  if (survey.response_status === 'completed') {
+    return c.json({ success: false, error: 'すでに返信済みのため変更できません' }, 400);
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE wahms_survey_responses SET reply_skipped = 1, updated_at = datetime('now') WHERE id = ?`,
+  ).bind(survey.id).run();
+  return c.json({ success: true, data: { id: survey.id, replySkipped: true } });
 });
 
 wahms.post('/api/wahms/survey-deliveries', async (c) => {
@@ -218,15 +267,27 @@ wahms.post('/api/wahms/survey-deliveries', async (c) => {
     : (targets.results || []).map((row) => row.line_user_id).filter(Boolean);
   if (!ids.length) return c.json({ success: false, error: 'この講義の申込者が見つかりません' }, 400);
 
-  const key = schoolKey(schoolName, eventDate);
-  const text = `【 ${schoolName}】\nご参加いただき、ありがとうございます。\n講義アンケートのご協力をお願いします。\n\n回答目安：60〜90秒\n\n${SURVEY_LIFF_URL}?s=${encodeURIComponent(key)}`;
+  const base = await c.env.DB
+    .prepare(`SELECT value FROM account_settings WHERE line_account_id = ? AND key = ?`)
+    .bind(scope.account.id, SURVEY_FORM_BASE_KEY)
+    .first<{ value: string }>();
+  if (!base?.value) {
+    return c.json({ success: false, error: 'アンケートフォームのURLが未設定です' }, 400);
+  }
+
+  // 受講者ごとに使い捨ての案内を作る。誰がどの講義に答えたかが確定するので、
+  // 講義名の取り違えが起きず、質問への1対1返信もそのまま使える。
   let success = 0;
   let failure = 0;
-  for (let i = 0; i < ids.length; i += 500) {
-    const chunk = ids.slice(i, i + 500);
-    const response = await proxySend(c, scope.account.id, 'multicast', { to: chunk, messages: [{ type: 'text', text }] });
-    if (response.ok) success += chunk.length;
-    else failure += chunk.length;
+  for (const lineUserId of ids) {
+    const token = inviteToken();
+    await c.env.DB.prepare(
+      `INSERT INTO wahms_survey_invites (token, line_account_id, line_user_id, school_name, event_date) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(token, scope.account.id, lineUserId, schoolName, eventDate).run();
+    const text = `【 ${schoolName}】\nご参加いただき、ありがとうございます。\n講義アンケートのご協力をお願いします。\n\n回答目安：60〜90秒\n\n${base.value}?t=${token}`;
+    const response = await proxySend(c, scope.account.id, 'push', { to: lineUserId, messages: [{ type: 'text', text }] });
+    if (response.ok) success += 1;
+    else failure += 1;
   }
   await c.env.DB.prepare(`INSERT INTO wahms_delivery_logs (id, line_account_id, delivery_type, title, target_count, success_count, failure_count, created_by) VALUES (?, ?, 'survey', ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), scope.account.id, `${schoolName} ${eventDate}`, ids.length, success, failure, c.get('staff')?.name || '担当者').run();
   return c.json({ success: failure === 0, data: { targetCount: ids.length, success, failure } });

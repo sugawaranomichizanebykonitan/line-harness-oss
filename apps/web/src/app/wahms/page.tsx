@@ -29,6 +29,123 @@ function Stat({ label, value, accent = false }: { label: string; value: string |
   </div>
 }
 
+/**
+ * Web版アンケート（LINE未登録の受講者）からの回答か。
+ * line_user_id に 'web-' を入れて区別している。LINE返信ができない相手なので、
+ * 一覧で見分けられるようにする。
+ */
+function isWebResponse(s: WahmsOverview['surveys'][number]): boolean {
+  return String(s.line_user_id ?? '').startsWith('web-')
+}
+
+/**
+ * 「返信対応しない」と決めた質問か。
+ * response_status には CHECK 制約があり値を増やせないので、別の列で持っている。
+ */
+function isReplySkipped(s: WahmsOverview['surveys'][number]): boolean {
+  return Number(s.reply_skipped ?? 0) === 1
+}
+
+/**
+ * 「返信対応しない」ボタン。押すと要対応リストから外れる。
+ *
+ * 戻す操作を画面に用意していないので、押す前に一度確認する。
+ */
+function SkipReplyButton({ surveyId, onSkip }: { surveyId: string; onSkip: (id: string) => Promise<void> }) {
+  const [confirming, setConfirming] = useState(false)
+  if (!confirming) {
+    return <button onClick={() => setConfirming(true)} className="mt-3 rounded-lg border border-gray-300 bg-white px-5 py-3 text-sm font-bold text-gray-600 hover:bg-gray-50">返信対応しない</button>
+  }
+  return <div className="mt-3 rounded-lg border border-gray-300 bg-white p-3">
+    <p className="text-sm text-gray-700">要対応から外し、通常のアンケート結果として扱います。よろしいですか？</p>
+    <div className="mt-2 flex gap-2">
+      <button onClick={() => { setConfirming(false); void onSkip(surveyId) }} className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-bold text-white">外す</button>
+      <button onClick={() => setConfirming(false)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-bold text-gray-600">やめる</button>
+    </div>
+  </div>
+}
+
+/** 申込の開催日を YYYY-MM-DD に揃える。'2026/08/21' 形式が混ざるため。 */
+function eventDay(value?: string | null): string {
+  return String(value || '').slice(0, 10).replace(/\//g, '-')
+}
+
+/** 配信画面で選ぶ講義。申込由来と開催予定由来を同じ形にそろえる。 */
+type LectureOption = { id: string; school_name: string; event_date: string; theme?: string }
+
+/** 時刻の秒を落とす。開催予定は 20:30:00 の形で返ってくる。 */
+function hhmm(value?: string): string {
+  return String(value || '').slice(0, 5)
+}
+
+/** その日に開催予定の講義。申込が0件でも、時間とテーマはここから出せる。 */
+function lectureOn(lectures: WahmsOverview['lectures'], school: string, day: string) {
+  return (lectures || []).find((l) => l.event_date === day && (!school || l.school_name === school))
+}
+
+/**
+ * 「本日の講義に何名申し込んでいるか」を一目で出す。
+ * 当日の運営で最初に知りたい数字なので、一覧を数えなくても分かるようにする。
+ *
+ * 申込が0件でも同じ見た目で0名と出す。ここで数えているのは公式LINE経由の
+ * 申込だけで、社内参加者や紹介参加者は入っていない。0件を「開催なし」と
+ * 書くと実際には開催しているのに開催が無いと読めてしまう。
+ */
+function TodayPanel({ applications, lectures, school }: { applications: WahmsOverview['applications']; lectures: WahmsOverview['lectures']; school: string }) {
+  const today = todayJst()
+  const scoped = school ? applications.filter((a) => a.school_name === school) : applications
+  const todays = scoped.filter((a) => eventDay(a.event_date) === today)
+  const dayLabel = new Date(today).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })
+
+  // 同じ日に同じ学校が複数枠あることは無い想定だが、念のため学校ごとにまとめる。
+  const groups = new Map<string, typeof todays>()
+  for (const a of todays) {
+    const list = groups.get(a.school_name) ?? []
+    list.push(a); groups.set(a.school_name, list)
+  }
+
+  const cards: Array<{ name: string; time: string; theme: string; count: number }> = todays.length > 0
+    ? Array.from(groups.entries()).map(([name, list]) => {
+        const planned = lectureOn(lectures, name, today)
+        return {
+          name,
+          time: String(list[0].event_time || '')
+            || (planned ? `${hhmm(planned.start_time)}〜${hhmm(planned.end_time)}` : ''),
+          theme: `${planned?.lecture_label ? `${planned.lecture_label}　` : ''}${String(list[0].theme || planned?.theme || '')}`,
+          count: list.length,
+        }
+      })
+    // 申込0件の日は申込テーブルに開催情報が無い。開催予定から引く。
+    : (() => {
+        const planned = lectureOn(lectures, school, today)
+        return [{
+          name: planned?.school_name || school || '全校',
+          time: planned ? `${hhmm(planned.start_time)}〜${hhmm(planned.end_time)}` : '',
+          theme: planned
+            ? `${planned.lecture_label ? `${planned.lecture_label}　` : ''}${planned.theme || ''}`
+            : '本日の開催予定はありません',
+          count: 0,
+        }]
+      })()
+
+  return <div className="mb-4 space-y-3">
+    {cards.map((card) => <div key={card.name} className="flex flex-col gap-3 rounded-xl border-2 border-green-500 bg-green-50 p-4 md:flex-row md:items-center">
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-bold text-green-700">本日 {dayLabel}</p>
+        <p className="mt-1 font-bold text-gray-900">{card.name}{card.time ? `　${card.time}` : ''}</p>
+        <p className="mt-0.5 truncate text-sm text-gray-600">{card.theme || 'テーマ未登録'}</p>
+      </div>
+      <div className="shrink-0 text-center md:text-right">
+        <span className="text-4xl font-bold text-green-700">{card.count}</span>
+        <span className="ml-1 text-sm font-bold text-green-700">名 申込</span>
+      </div>
+    </div>)}
+    <p className="text-xs text-gray-500">
+      申込数は公式LINEからの申込のみです。社内参加者・紹介参加者は含みません。
+    </p>
+  </div>
+}
+
 export default function WahmsPage() {
   const { selectedAccount, selectedAccountId, loading: accountLoading } = useAccount()
   const [tab, setTab] = useState<Tab>('participants')
@@ -53,19 +170,38 @@ export default function WahmsPage() {
   }, [selectedAccountId, isWahms, school, search])
 
   useEffect(() => { void refresh() }, [refresh])
-  const eventOptions = useMemo(() => {
+  // 配信先に選べる講義。申込がまだ0件の回も選べないと、当日の朝に
+  // アンケートを準備できない。開催予定と申込の両方から作る。
+  const eventOptions = useMemo<LectureOption[]>(() => {
     const seen = new Set<string>()
-    return (data?.applications || []).filter((item) => {
-      const key = `${item.school_name}|${String(item.event_date || '').slice(0, 10)}`
-      if (seen.has(key)) return false
-      seen.add(key); return true
-    })
+    const out: LectureOption[] = []
+    const push = (schoolName: string, rawDate: string, theme?: string) => {
+      const day = eventDay(rawDate)
+      if (!schoolName || !day) return
+      const key = `${schoolName}|${day}`
+      if (seen.has(key)) return
+      seen.add(key)
+      out.push({ id: key, school_name: schoolName, event_date: day, theme })
+    }
+    for (const a of data?.applications || []) push(String(a.school_name), String(a.event_date || ''), a.theme as string)
+    for (const l of data?.lectures || []) push(l.school_name, l.event_date, l.theme)
+    return out
   }, [data])
 
   if (accountLoading) return <><Header title="WAHMS運営" /><div className="p-8 text-gray-500">読み込み中...</div></>
   if (!isWahms) return <><Header title="WAHMS運営" /><div className="max-w-2xl mx-auto p-8"><div className="rounded-xl border border-gray-200 bg-white p-8 text-center"><h1 className="text-xl font-bold">WAHMS専用機能です</h1><p className="mt-2 text-gray-500">左上のLINEアカウントを「WAHMS」に切り替えると表示されます。</p></div></div></>
 
   const flash = (message: string) => { setNotice(message); setTimeout(() => setNotice(''), 5000) }
+
+  // 返信するほどでもない質問を要対応から外す。LINEへは何も送らない。
+  const skipReply = async (surveyId: string) => {
+    if (!selectedAccountId) return
+    try {
+      await wahmsApi.skipReply(selectedAccountId, surveyId)
+      flash('返信対応しないことにしました。要対応リストから外れます')
+      await refresh()
+    } catch { setError('変更できませんでした。時間をおいて試してください。') }
+  }
 
   return <>
     <Header title="WAHMS運営" />
@@ -91,14 +227,15 @@ export default function WahmsPage() {
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="名前・LINE名・職業で検索" className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm" />
           <button onClick={() => void refresh()} className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-semibold text-white">検索</button>
         </div>
-        {school ? <div className="overflow-hidden rounded-xl border bg-white"><div className="border-b bg-gray-50 px-4 py-3 font-bold">{school} の申込者</div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="p-3">参加者</th><th className="p-3">開催日</th><th className="p-3">時間</th><th className="p-3">テーマ</th><th className="p-3">実参加</th></tr></thead><tbody>{data.applications.map((a) => <tr key={a.id} className="border-t"><td className="p-3 font-medium">{a.participant_name || '名前未登録'}</td><td className="p-3">{dateLabel(a.event_date)}</td><td className="p-3">{a.event_time || '—'}</td><td className="max-w-md p-3">{a.theme || '—'}</td><td className="p-3">{a.attended == null ? '未確認' : a.attended ? '参加' : '不参加'}</td></tr>)}</tbody></table></div></div>
+        <TodayPanel applications={data.applications} lectures={data.lectures} school={school} />
+        {school ? <div className="overflow-hidden rounded-xl border bg-white"><div className="border-b bg-gray-50 px-4 py-3 font-bold">{school} の申込者</div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="p-3">参加者</th><th className="p-3">開催日</th><th className="p-3">時間</th><th className="p-3">テーマ</th><th className="p-3">実参加</th></tr></thead><tbody>{data.applications.map((a) => <tr key={a.id} className={`border-t ${eventDay(a.event_date) === todayJst() ? 'bg-green-50' : ''}`}><td className="p-3 font-medium">{a.participant_name || '名前未登録'}{eventDay(a.event_date) === todayJst() && <span className="ml-2 rounded bg-green-600 px-1.5 py-0.5 text-[10px] font-bold text-white">本日</span>}</td><td className="p-3">{dateLabel(a.event_date)}</td><td className="p-3">{a.event_time || '—'}</td><td className="max-w-md p-3">{a.theme || '—'}</td><td className="p-3">{a.attended == null ? '未確認' : a.attended ? '参加' : '不参加'}</td></tr>)}</tbody></table></div></div>
         : <div className="overflow-hidden rounded-xl border bg-white"><div className="border-b bg-gray-50 px-4 py-3 font-bold">登録者一覧</div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="p-3">名前</th><th className="p-3">LINE表示名</th><th className="p-3">職業</th><th className="p-3">申込</th><th className="p-3">ステータス</th></tr></thead><tbody>{data.participants.map((p) => <tr key={p.id} className="border-t"><td className="p-3 font-medium">{p.name || '未登録'}</td><td className="p-3">{p.line_display_name || '—'}</td><td className="p-3">{p.occupation || '—'}</td><td className="p-3">{Number(p.booking_count || 0)}回</td><td className="p-3">{p.status || '—'}</td></tr>)}</tbody></table></div></div>}
       </section>}
 
       {tab === 'surveys' && data && <section>
         <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4"><Stat label="回答者数" value={`${data.summary.surveyResponses}名`} /><Stat label="平均得点" value={data.summary.averageSatisfaction == null ? '—' : `${data.summary.averageSatisfaction.toFixed(2)} / 5`} /><Stat label="無料なのが信じられない率" value={`${data.summary.unbelievableRate.toFixed(1)}%`} /><Stat label="要対応の質問" value={`${data.summary.pendingQuestions}件`} accent={data.summary.pendingQuestions > 0} /></div>
         <div className="mb-4 flex gap-2 overflow-x-auto pb-1"><button onClick={() => setSchool('')} className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium ${!school ? 'bg-green-600 text-white' : 'bg-white border'}`}>全学校</button>{data.schools.map((s) => <button key={s.school_name} onClick={() => setSchool(s.school_name)} className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium ${school === s.school_name ? 'bg-green-600 text-white' : 'bg-white border'}`}>{s.school_name}</button>)}</div>
-        <div className="space-y-3">{data.surveys.map((s) => <article key={s.id} className="rounded-xl border bg-white p-4"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">{s.school_name}</span><span className="text-xs text-gray-500">{dateLabel(s.responded_at)}</span>{s.response_status === 'pending' && <span className="rounded-full bg-red-100 px-2 py-1 text-xs font-bold text-red-700">要対応</span>}{s.response_status === 'completed' && <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-bold text-gray-600">対応完了</span>}</div><div className="mt-3 grid gap-3 text-sm md:grid-cols-4"><div><span className="text-gray-500">回答者</span><p className="font-medium">{s.respondent_name || '名前未登録'}</p></div><div><span className="text-gray-500">満足度</span><p className="font-medium">{s.satisfaction ? `${s.satisfaction} / 5` : '—'}</p></div><div><span className="text-gray-500">価値評価</span><p className="font-medium">{s.value_rating || '—'}</p></div><div><span className="text-gray-500">次回参加意向</span><p className="font-medium">{s.next_intent || '—'}</p></div></div>{s.question && <div className="mt-4 rounded-lg bg-amber-50 p-3"><p className="text-xs font-bold text-amber-700">青山さんへの質問</p><p className="mt-1 text-sm text-gray-800">{s.question}</p>{s.response_status === 'completed' ? <div className="mt-3 border-t border-amber-200 pt-3"><p className="text-xs font-bold text-gray-500">返信済み</p><p className="mt-1 text-sm">{s.answer}</p></div> : <div className="mt-3 flex flex-col gap-2 md:flex-row"><textarea value={answers[s.id] || ''} onChange={(e) => setAnswers({ ...answers, [s.id]: e.target.value })} placeholder="ここに返信を入力" className="min-h-24 flex-1 rounded-lg border border-amber-300 bg-white p-3 text-sm" /><button onClick={async () => { if (!selectedAccountId) return; try { await wahmsApi.reply(selectedAccountId, s.id, answers[s.id] || ''); flash('LINEへ返信し、対応完了にしました'); await refresh() } catch { setError('返信できませんでした。内容を確認してください。') } }} className="rounded-lg bg-green-600 px-5 py-3 font-bold text-white">LINEへ返信</button></div>}</div>}</article>)}</div>
+        <div className="space-y-3">{data.surveys.map((s) => <article key={s.id} className="rounded-xl border bg-white p-4"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">{s.school_name}</span><span className="text-xs text-gray-500">{dateLabel(s.responded_at)}</span>{isWebResponse(s) && <span className="rounded-full bg-blue-100 px-2 py-1 text-xs font-bold text-blue-700">Web回答</span>}{s.response_status === 'pending' && !isReplySkipped(s) && <span className="rounded-full bg-red-100 px-2 py-1 text-xs font-bold text-red-700">要対応</span>}{s.response_status === 'completed' && <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-bold text-gray-600">対応完了</span>}{isReplySkipped(s) && <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-bold text-gray-600">返信不要</span>}</div><div className="mt-3 grid gap-3 text-sm md:grid-cols-4"><div><span className="text-gray-500">回答者</span><p className="font-medium">{s.respondent_name || '名前未登録'}</p></div><div><span className="text-gray-500">満足度</span><p className="font-medium">{s.satisfaction ? `${s.satisfaction} / 5` : '—'}</p></div><div><span className="text-gray-500">価値評価</span><p className="font-medium">{s.value_rating || '—'}</p></div><div><span className="text-gray-500">次回参加意向</span><p className="font-medium">{s.next_intent || '—'}</p></div></div>{s.question && <div className="mt-4 rounded-lg bg-amber-50 p-3"><p className="text-xs font-bold text-amber-700">青山さんへの質問</p><p className="mt-1 text-sm text-gray-800">{s.question}</p>{s.response_status === 'completed' ? <div className="mt-3 border-t border-amber-200 pt-3"><p className="text-xs font-bold text-gray-500">返信済み</p><p className="mt-1 text-sm">{s.answer}</p></div> : isReplySkipped(s) ? <div className="mt-3 border-t border-amber-200 pt-3 text-sm text-gray-600">返信対応しないことにした質問です。集計には含まれています。</div> : isWebResponse(s) ? <div className="mt-3 border-t border-amber-200 pt-3"><p className="text-sm text-gray-600">この方は公式LINE未登録のため、ここからは返信できません。別の手段でご連絡ください。</p><SkipReplyButton surveyId={s.id} onSkip={skipReply} /></div> : <div className="mt-3 flex flex-col gap-2 md:flex-row"><textarea value={answers[s.id] || ''} onChange={(e) => setAnswers({ ...answers, [s.id]: e.target.value })} placeholder="ここに返信を入力" className="min-h-24 flex-1 rounded-lg border border-amber-300 bg-white p-3 text-sm" /><div className="flex flex-col gap-2"><button onClick={async () => { if (!selectedAccountId) return; try { await wahmsApi.reply(selectedAccountId, s.id, answers[s.id] || ''); flash('LINEへ返信し、対応完了にしました'); await refresh() } catch { setError('返信できませんでした。内容を確認してください。') } }} className="rounded-lg bg-green-600 px-5 py-3 font-bold text-white">LINEへ返信</button><SkipReplyButton surveyId={s.id} onSkip={skipReply} /></div></div>}</div>}</article>)}</div>
       </section>}
 
       {tab === 'archives' && data && <ArchiveTab data={data} accountId={selectedAccountId!} refresh={refresh} flash={flash} setError={setError} />}
@@ -135,31 +272,52 @@ function ArchiveTab({ data, accountId, refresh, flash, setError }: { data: Wahms
     [data.archives, school],
   )
 
-  // 回の選択肢は「既にある枠」と「マスターの第11〜20回」を統合する。
-  // 既存の枠を選べば上書き、無い回を選べば新規に作られる。
+  // 回の選択肢。テーマと開催日は**開催予定を正**とする。
+  //
+  // 以前は画面に持たせたマスターと、登録済みのアーカイブ行のテーマを混ぜて
+  // いた。アーカイブ行に古いテーマが残っていると、そちらが勝って別の回の
+  // テーマが表示される (実際にマーケティング学校の第13回が第15回のテーマに
+  // なっていた)。開催予定は申込やリマインドと同じ元データなので、ここを
+  // 正にすればズレようがない。
+  //
+  // マスターは開催予定に無い学校のための保険としてだけ残している。
   const lectureOptions = useMemo(() => {
-    const map = new Map<number, { theme: string; done: boolean }>()
-    for (const l of WAHMS_LECTURE_MASTER[school] ?? []) map.set(l.lecture, { theme: l.theme, done: false })
+    const map = new Map<number, { theme: string; heldOn: string; done: boolean }>()
+    for (const l of WAHMS_LECTURE_MASTER[school] ?? []) {
+      map.set(l.lecture, { theme: l.theme, heldOn: '', done: false })
+    }
+    for (const l of data.lectures || []) {
+      if (l.school_name !== school) continue
+      const n = Number(String(l.lecture_label || '').replace(/[^0-9]/g, ''))
+      if (!n) continue
+      map.set(n, { theme: l.theme || '', heldOn: l.event_date, done: false })
+    }
+    // 動画が登録済みかどうかだけ、アーカイブ行から取る。
     for (const a of rows) {
       const n = Number(a.lecture_number || 0)
+      const known = map.get(n)
       if (!n) continue
-      const master = map.get(n)
       map.set(n, {
-        theme: a.theme || master?.theme || '',
+        theme: known?.theme || a.theme || '',
+        heldOn: known?.heldOn || eventDay(a.held_on),
         done: Boolean(a.youtube_url),
       })
     }
     return Array.from(map.entries()).sort((a, b) => a[0] - b[0])
-  }, [school, rows])
+  }, [school, rows, data.lectures])
 
   // 未登録（動画がまだ無い）いちばん若い回を初期選択にする。
   useEffect(() => {
     const next = lectureOptions.find(([, v]) => !v.done)
     setLecture(next ? String(next[0]) : '')
-    setHeldOn(''); setYoutubeUrl('')
+    setYoutubeUrl('')
   }, [lectureOptions])
 
-  const theme = lectureOptions.find(([n]) => String(n) === lecture)?.[1].theme ?? ''
+  const selected = lectureOptions.find(([n]) => String(n) === lecture)?.[1]
+  const theme = selected?.theme ?? ''
+
+  // 開催日は開催予定から自動で入れる。手で入れ直す必要がない。
+  useEffect(() => { setHeldOn(selected?.heldOn ?? '') }, [lecture, selected?.heldOn])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -216,7 +374,7 @@ function ArchiveTab({ data, accountId, refresh, flash, setError }: { data: Wahms
   </section>
 }
 
-function DeliveryTab({ data, accountId, eventOptions, refresh, flash, setError }: { data: WahmsOverview; accountId: string; eventOptions: WahmsOverview['applications']; refresh: () => Promise<void>; flash: (s: string) => void; setError: (s: string) => void }) {
+function DeliveryTab({ data, accountId, eventOptions, refresh, flash, setError }: { data: WahmsOverview; accountId: string; eventOptions: LectureOption[]; refresh: () => Promise<void>; flash: (s: string) => void; setError: (s: string) => void }) {
   const [event, setEvent] = useState('')
 
   // 開催日順に並べ替える。申込データは開催日の新しい順で来るが、配信は

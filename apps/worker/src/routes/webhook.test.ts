@@ -196,6 +196,257 @@ describe('POST /webhook — DoS defenses (#104)', () => {
 });
 
 describe('POST /webhook — WAHMS legacy bridge', () => {
+  /** WAHMSアカウントとして署名検証を通すための共通設定。 */
+  function wahmsAccounts() {
+    vi.mocked(verifySignature).mockResolvedValue(true);
+    // 友だち解決まで通さないと handleEvent が途中で落ち、返信経路が動かない。
+    vi.mocked(getFriendByLineUserId).mockResolvedValue({
+      id: 'friend-1',
+      line_user_id: 'Uarchive',
+      line_account_id: 'wahms-account',
+      is_following: 1,
+    } as never);
+    vi.mocked(getLineAccounts).mockResolvedValue([
+      {
+        id: 'wahms-account',
+        channel_id: 'wahms-channel',
+        channel_access_token: 'wahms-token',
+        channel_secret: 'env-default-secret',
+        name: 'WAHMS',
+        is_active: 1,
+      } as never,
+    ]);
+  }
+
+  /** アーカイブ2本ぶんを返すだけの最小D1。返信本文の組み立てまで通す。 */
+  function archiveDb() {
+    return {
+      prepare: () => ({
+        bind: () => ({
+          run: async () => ({ success: true }),
+          first: async () => null,
+          all: async () => ({
+            results: [
+              { school_name: '🔥 マーケティング学校', lecture_number: '1.0', theme: 'テーマA', held_on: '2026-05-12T00:00:00', youtube_url: 'https://youtu.be/a' },
+              { school_name: '🔥 マーケティング学校', lecture_number: '2.0', theme: 'テーマB', held_on: '2026-05-19T00:00:00', youtube_url: 'https://youtu.be/b' },
+            ],
+          }),
+        }),
+      }),
+    };
+  }
+
+  function wahmsEnv() {
+    return {
+      ...baseEnv,
+      DB: archiveDb(),
+      WAHMS_LEGACY_LINE_ACCOUNT_ID: 'wahms-account',
+      WAHMS_LEGACY_WEBHOOK_URL: 'https://script.google.test/exec',
+    };
+  }
+
+  function textEvent(text: string) {
+    return {
+      type: 'message',
+      replyToken: 'reply-token',
+      source: { type: 'user', userId: 'Uarchive' },
+      message: { type: 'text', id: 'm1', text },
+    };
+  }
+
+  // Workers用のfetch型とvi.spyOnの型が噛み合わないので、呼び出し履歴だけを見る形にする。
+  async function post(events: unknown[], fetchSpy: { mock: { calls: unknown[][] } }) {
+    const executionCtx = {
+      waitUntil: vi.fn(),
+      passThroughOnException: vi.fn(),
+      props: {},
+    } as unknown as ExecutionContext;
+    const rawBody = JSON.stringify({ destination: 'wahms', events });
+    const res = await setupApp().request(
+      '/webhook',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Line-Signature': 'A'.repeat(43) + '=' },
+        body: rawBody,
+      },
+      wahmsEnv(),
+      executionCtx,
+    );
+    // 未解決のまま残すとテスト間で漏れるので、積まれた処理を流し切る。
+    for (const call of vi.mocked(executionCtx.waitUntil).mock.calls) {
+      await (call[0] as Promise<unknown>).catch(() => {});
+    }
+    const forwarded = fetchSpy.mock.calls.some((c) => String(c[0]).includes('script.google.test'));
+    return { res, forwarded };
+  }
+
+  test('アーカイブ要求はApps Scriptへ転送しない（二重返信を防ぐ）', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { res, forwarded } = await post([textEvent('マーケティング学校 アーカイブ')], fetchSpy);
+    expect(res.status).toBe(200);
+    expect(forwarded).toBe(false);
+    // 転送しない代わりに、Worker が replyToken を使って一覧を返す。
+    expect(lineClientMocks.replyMessage).toHaveBeenCalledTimes(1);
+    const [, messages] = lineClientMocks.replyMessage.mock.calls[0];
+    expect(messages[0].text).toContain('🔥 マーケティング学校 アーカイブ（2本）');
+    expect(messages[0].text).toContain('https://youtu.be/a');
+    fetchSpy.mockRestore();
+  });
+
+  test('アーカイブ以外はこれまでどおり転送する', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const { forwarded } = await post([textEvent('今週の開催日')], fetchSpy);
+    expect(forwarded).toBe(true);
+    fetchSpy.mockRestore();
+  });
+
+  test('アーカイブ要求と他のイベントが混ざる場合は、取りこぼさないよう転送する', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const { forwarded } = await post(
+      [textEvent('マーケティング学校 アーカイブ'), textEvent('よくある質問')],
+      fetchSpy,
+    );
+    expect(forwarded).toBe(true);
+    fetchSpy.mockRestore();
+  });
+
+  // ─── 申込の引き取り ───────────────────────────────────────────
+  // Worker が確実に扱えるときだけ返信し、それ以外は Apps Script へ渡す。
+  // 「返せなかったのに転送もしない」が起きると、申し込んだ人に何も届かない。
+
+  function bookingDb({ repeat = true, slot = true, zoom = true } = {}) {
+    const SLOT = {
+      slotId: 'slot-1', eventId: 'ev-1', schoolName: '🔥 マーケティング学校',
+      eventDate: '2026-08-25', startTime: '20:30', endTime: '22:00',
+      lectureLabel: '第13回', theme: '安売りは、本当に「負け」なのか？',
+    };
+    const make = (sql: string) => ({
+      run: async () => ({ success: true }),
+      first: async () => {
+        if (sql.includes('FROM wahms_participants')) return repeat ? { ok: 1 } : null;
+        if (sql.includes('FROM event_slots')) return slot ? SLOT : null;
+        if (sql.includes('FROM friends')) return { id: 'friend-1' };
+        if (sql.includes('FROM wahms_applications')) return null;
+        if (sql.includes('FROM event_bookings')) return null;
+        return null;
+      },
+      all: async () => ({
+        results: sql.includes('FROM account_settings') && zoom
+          ? [
+              { key: 'wahms_zoom_url', value: 'https://zoom.test/j/1' },
+              { key: 'wahms_zoom_id', value: '4891469109' },
+              { key: 'wahms_zoom_password', value: 'whams' },
+            ]
+          : [],
+      }),
+    });
+    return { prepare: (sql: string) => ({ bind: () => make(sql), ...make(sql) }) };
+  }
+
+  async function postBooking(text: string, db: unknown, fetchSpy: { mock: { calls: unknown[][] } }) {
+    const executionCtx = { waitUntil: vi.fn(), passThroughOnException: vi.fn(), props: {} } as unknown as ExecutionContext;
+    const res = await setupApp().request(
+      '/webhook',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Line-Signature': 'A'.repeat(43) + '=' },
+        body: JSON.stringify({ destination: 'wahms', events: [textEvent(text)] }),
+      },
+      { ...wahmsEnv(), DB: db },
+      executionCtx,
+    );
+    for (const call of vi.mocked(executionCtx.waitUntil).mock.calls) {
+      await (call[0] as Promise<unknown>).catch(() => {});
+    }
+    return { res, forwarded: fetchSpy.mock.calls.some((c) => String(c[0]).includes('script.google.test')) };
+  }
+
+  test('リピーターの申込は Worker が返し、転送しない', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await postBooking('8月25日マーケティング学校に申し込む', bookingDb(), fetchSpy);
+    expect(forwarded).toBe(false);
+    expect(lineClientMocks.replyMessage).toHaveBeenCalledTimes(1);
+    const [, messages] = lineClientMocks.replyMessage.mock.calls[0];
+    expect(messages[0].text).toBe('✅ お申し込みが完了しました');
+    expect(messages[1].text).toContain('🔥 マーケティング学校');
+    expect(messages[1].text).toContain('8月25日（火）20:30〜22:00');
+    expect(messages[1].text).toContain('https://zoom.test/j/1');
+    fetchSpy.mockRestore();
+  });
+
+  test('初参加の人は Apps Script に任せる（初回アンケートの案内があるため）', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await postBooking('8月25日マーケティング学校に申し込む', bookingDb({ repeat: false }), fetchSpy);
+    expect(forwarded).toBe(true);
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  test('返信を任せた場合でも、申込は必ずこちらに記録する', async () => {
+    // 当日はじめて友だち追加した人の申込が管理画面に出ず、講義当日に
+    // 3件取りこぼした (2026-08-26 WEB学校)。記録と返信は別の話なので、
+    // 返信を Apps Script に任せても記録は残す。
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const calls: string[] = [];
+    const db = bookingDb({ repeat: false });
+    const orig = db.prepare.bind(db);
+    (db as { prepare: (sql: string) => unknown }).prepare = (sql: string) => { calls.push(sql); return orig(sql) };
+    await postBooking('8月25日マーケティング学校に申し込む', db, fetchSpy);
+    expect(calls.some((c) => c.includes('INSERT INTO wahms_applications'))).toBe(true);
+    fetchSpy.mockRestore();
+  });
+
+  test('開催予定に無い回は記録もしない', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const calls: string[] = [];
+    const db = bookingDb({ slot: false });
+    const orig = db.prepare.bind(db);
+    (db as { prepare: (sql: string) => unknown }).prepare = (sql: string) => { calls.push(sql); return orig(sql) };
+    const { forwarded } = await postBooking('5月12日マーケティング学校に申し込む', db, fetchSpy);
+    expect(forwarded).toBe(true);
+    expect(calls.some((c) => c.includes('INSERT INTO wahms_applications'))).toBe(false);
+    fetchSpy.mockRestore();
+  });
+
+  test('開催予定に無い回は Apps Script に任せる（終了済みの案内があるため）', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await postBooking('5月12日マーケティング学校に申し込む', bookingDb({ slot: false }), fetchSpy);
+    expect(forwarded).toBe(true);
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  test('Zoom設定が無ければ Apps Script に任せる（URLの無い案内を送らない）', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await postBooking('8月25日マーケティング学校に申し込む', bookingDb({ zoom: false }), fetchSpy);
+    expect(forwarded).toBe(true);
+    fetchSpy.mockRestore();
+  });
+
+  test('返信に失敗したら転送する（申し込んだのに無反応を作らない）', async () => {
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    lineClientMocks.replyMessage.mockRejectedValueOnce(new Error('LINE API down'));
+    const { forwarded } = await postBooking('8月25日マーケティング学校に申し込む', bookingDb(), fetchSpy);
+    expect(forwarded).toBe(true);
+    fetchSpy.mockRestore();
+  });
+
   test('mirrors a signed WAHMS payload to the existing Apps Script endpoint', async () => {
     vi.mocked(verifySignature).mockResolvedValue(true);
     vi.mocked(getLineAccounts).mockResolvedValue([

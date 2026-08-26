@@ -15,6 +15,8 @@ function fakeDb() {
           first: async () => {
             if (sql.includes('channel_access_token')) return { channel_access_token: 'dummy-token' };
             if (sql.includes('FROM line_accounts')) return { id: 'acc-1', name: 'WAHMS', channel_id: '2010052458' };
+            // アンケートURLの設定。未設定だと配信そのものが止まる。
+            if (sql.includes('FROM account_settings')) return { value: 'https://wahms.test/survey' };
             return null;
           },
           all: async () => ({ results: [{ line_user_id: 'Uaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }] }),
@@ -91,11 +93,17 @@ describe('WAHMS配信の全員配信ガード', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  test('アンケート: 正しいテストIDならmulticastの宛先が1人だけになる', async () => {
+  test('アンケート: 正しいテストIDなら宛先が1人だけになる', async () => {
+    // 受講者ごとに使い捨ての案内URLを作るので、宛先ごとのpushで送る。
     const res = await post('/api/wahms/survey-deliveries', { ...SURVEY, testRecipientId: TEST_ID });
     expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toBe('https://api.line.me/v2/bot/message/multicast');
-    expect(JSON.parse(String(init?.body)).to).toEqual([TEST_ID]);
+    expect(url).toBe('https://api.line.me/v2/bot/message/push');
+    const body = JSON.parse(String(init?.body));
+    expect(body.to).toBe(TEST_ID);
+    // URLに載るのは案内トークンだけ。LINEのユーザーIDは出さない。
+    expect(body.messages[0].text).toContain('https://wahms.test/survey?t=');
+    expect(body.messages[0].text).not.toContain(TEST_ID);
   });
 });

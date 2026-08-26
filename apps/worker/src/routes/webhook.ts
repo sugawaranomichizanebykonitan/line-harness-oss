@@ -25,6 +25,11 @@ import { replyViaHarnessProxy } from '../services/line-proxy-send.js';
 import type { HarnessProxyDispatch } from '../services/line-proxy-send.js';
 import { dispatchLineProxyLocally } from '../services/local-line-proxy.js';
 
+import { parseArchiveRequest, buildArchiveReply } from '../services/wahms-archive.js';
+import { parseBookingRequest, findLectureSlot, recordBooking } from '../services/wahms-booking.js';
+import { loadZoomSettings, bookingConfirmMessages } from '../services/wahms-messages.js';
+import { ensureWahmsParticipant } from '../services/wahms-participant.js';
+
 const webhook = new Hono<Env>();
 
 // LINE webhook bodies are small (events array). Cap defends against unauthenticated
@@ -183,6 +188,46 @@ webhook.post('/webhook', async (c) => {
     c.env.WAHMS_LEGACY_WEBHOOK_URL,
   );
 
+  // アーカイブ一覧は管理画面から登録するようになったので、Worker が D1 から
+  // 直接返す。Apps Script も同じイベントを受け取ると二重返信になるため、
+  // 「全イベントがアーカイブ要求のとき」だけ転送を止めて Worker が応答する。
+  //
+  // 1回の webhook に他の種類のイベントが混ざっている場合は、取りこぼしを
+  // 避けて従来どおり丸ごと Apps Script へ渡し、Worker は応答しない。
+  // (LINE は利用者の1操作につき1イベントで送ってくるため、実運用では
+  //  ほぼ常に「アーカイブ要求のみ」になる)
+  const archiveRequests = legacyReplyOwner
+    ? body.events.filter(
+        (e) =>
+          e.type === 'message' &&
+          e.message?.type === 'text' &&
+          Boolean(parseArchiveRequest(e.message.text)),
+      )
+    : [];
+  const answerArchiveLocally =
+    archiveRequests.length > 0 && archiveRequests.length === body.events.length;
+
+  // 申込も Worker が返せるようにする。ただし「返せたときだけ」転送を止める。
+  //
+  // 初参加の人には Apps Script が初回アンケートへ案内する処理があり、終了済みの
+  // 回には終了の案内を返す。そこまで作り込むより、Worker が確実に扱える場合
+  // (リピーター × 開催予定にある回 × Zoom設定あり) だけ引き取り、それ以外は
+  // 従来どおり Apps Script に任せるほうが安全。
+  //
+  // 判定は返信の成否そのもの。Worker が返せなかったら転送するので、こちらの
+  // 不具合が「申し込んでも返事が来ない」になることがない。
+  const bookingRequests = legacyReplyOwner
+    ? body.events.filter(
+        (e) =>
+          e.type === 'message' &&
+          e.message?.type === 'text' &&
+          Boolean(parseBookingRequest(e.message.text)),
+      )
+    : [];
+  const attemptBookingLocally =
+    bookingRequests.length > 0 && bookingRequests.length === body.events.length;
+  const bookingReplied = { done: false };
+
   // 非同期処理 — LINE は ~1s 以内のレスポンスを要求
   const processingPromise = (async () => {
     const proxyDispatch: HarnessProxyDispatch = (request) =>
@@ -200,6 +245,9 @@ webhook.post('/webhook', async (c) => {
           c.env.IMAGES,
           proxyDispatch,
           legacyReplyOwner,
+          answerArchiveLocally,
+          attemptBookingLocally,
+          bookingReplied,
         );
       } catch (err) {
         console.error('Error handling webhook event:', err);
@@ -216,10 +264,22 @@ webhook.post('/webhook', async (c) => {
   if (
     matchedAccountId &&
     c.env.WAHMS_LEGACY_LINE_ACCOUNT_ID === matchedAccountId &&
-    c.env.WAHMS_LEGACY_WEBHOOK_URL
+    c.env.WAHMS_LEGACY_WEBHOOK_URL &&
+    // アーカイブ要求は Worker が返すので転送しない。転送すると Apps Script も
+    // 返してしまい、利用者に同じ一覧が2通届く。
+    !answerArchiveLocally
   ) {
+    const legacyUrl = c.env.WAHMS_LEGACY_WEBHOOK_URL;
     c.executionCtx.waitUntil(
-      forwardToLegacyWebhook(c.env.WAHMS_LEGACY_WEBHOOK_URL, rawBody),
+      (async () => {
+        if (attemptBookingLocally) {
+          // 返信できたかが確定するまで待つ。replyToken は約1分有効なので、
+          // ここで待ってから転送しても Apps Script は返信できる。
+          await processingPromise;
+          if (bookingReplied.done) return;
+        }
+        await forwardToLegacyWebhook(legacyUrl, rawBody);
+      })(),
     );
   }
 
@@ -237,6 +297,9 @@ async function handleEvent(
   r2?: R2Bucket,
   proxyDispatch?: HarnessProxyDispatch,
   legacyReplyOwner = false,
+  answerArchiveLocally = false,
+  attemptBookingLocally = false,
+  bookingReplied: { done: boolean } = { done: false },
 ): Promise<void> {
   if (event.type === 'follow') {
     const userId =
@@ -269,6 +332,16 @@ async function handleEvent(
       await db.prepare('UPDATE friends SET line_account_id = ?, updated_at = ? WHERE id = ?')
         .bind(lineAccountId, jstNow(), friend.id).run();
       console.log(`[follow] line_account_id set to ${lineAccountId} for friend ${friend.id}`);
+    }
+
+    // WAHMS の登録者マスターにも同時に作る。Apps Script の同期を待たない。
+    if (legacyReplyOwner && lineAccountId) {
+      try {
+        const r = await ensureWahmsParticipant(db, lineAccountId, userId, profile?.displayName ?? null);
+        console.log(`[wahms-participant] ${r} ${userId}`);
+      } catch (err) {
+        console.error('[wahms-participant] failed', err);
+      }
     }
 
     // 新規・再フォローのどちらでも、最初の友だち登録マイルを同じキーで非同期投入する。
@@ -582,6 +655,76 @@ async function handleEvent(
     // would race the established rich-menu / booking responses.
     if (legacyReplyOwner) {
       await upsertChatOnMessage(db, friend.id);
+
+      // 申込。確実に扱えるときだけ Worker が記録して返信する。返信できな
+      // かった場合は呼び出し元が Apps Script へ転送するので、利用者から見て
+      // 「申し込んだのに反応が無い」にはならない。
+      const booking = parseBookingRequest(incomingText);
+      const bookingUserId = event.source.userId;
+      if (booking && lineAccountId && bookingUserId && event.replyToken) {
+        try {
+          // 初参加の人は Apps Script が初回アンケートへ案内する。その導線を
+          // Worker はまだ持っていないので引き取らない。
+          const slot = await findLectureSlot(db, lineAccountId, booking);
+
+          // 返信を Apps Script に任せる場合でも、記録だけは必ずこちらで持つ。
+          // 以前は引き取れたときだけ記録しており、当日はじめて友だち追加した
+          // 人の申込が管理画面に出なかった (2026-08-26 のWEB学校で3件)。
+          // 記録と返信は別の話なので、条件を分ける。
+          if (slot) {
+            await recordBooking(db, lineAccountId, bookingUserId, slot);
+          } else {
+            console.warn(`[wahms-booking] slot not found: ${incomingText}`);
+          }
+
+          // 初参加の人は Apps Script が初回アンケートへ案内する。その導線を
+          // Worker はまだ持っていないので、返信は引き取らない。
+          const repeat = await db
+            .prepare(
+              `SELECT 1 AS ok FROM wahms_participants
+                WHERE line_account_id = ? AND line_user_id = ?
+                  AND survey_completed_at IS NOT NULL AND survey_completed_at <> ''`,
+            )
+            .bind(lineAccountId, bookingUserId)
+            .first<{ ok: number }>();
+          const zoom = repeat && slot ? await loadZoomSettings(db, lineAccountId) : null;
+          if (attemptBookingLocally && repeat && slot && zoom) {
+            await lineClient.replyMessage(
+              event.replyToken,
+              bookingConfirmMessages(slot, zoom).map((text) => ({ type: 'text' as const, text })),
+            );
+            bookingReplied.done = true;
+            console.log(`[wahms-booking] replied ${slot.schoolName} ${slot.eventDate}`);
+          } else {
+            console.log(
+              `[wahms-booking] recorded, reply deferred to legacy (repeat=${Boolean(repeat)} slot=${Boolean(slot)} zoom=${Boolean(zoom)})`,
+            );
+          }
+        } catch (err) {
+          // ここで落ちても bookingReplied.done は false のままなので転送される。
+          console.error('[wahms-booking] takeover failed', err);
+        }
+      }
+
+      // アーカイブ要求だけは Worker が D1 から返す。この webhook は Apps Script
+      // へ転送していないので、replyToken を使うのはここだけになる。
+      const school = answerArchiveLocally ? parseArchiveRequest(incomingText) : null;
+      if (school && lineAccountId && event.replyToken) {
+        try {
+          const text = await buildArchiveReply(db, lineAccountId, school);
+          if (text) {
+            await lineClient.replyMessage(event.replyToken, [{ type: 'text', text }]);
+          } else {
+            // 該当学校が D1 に無い。黙って落とさず、その旨を返す。
+            console.warn(`[wahms-archive] unknown school: ${school}`);
+            await lineClient.replyMessage(event.replyToken, [
+              { type: 'text', text: 'アーカイブが見つかりませんでした。メニューからもう一度お試しください。' },
+            ]);
+          }
+        } catch (err) {
+          console.error('[wahms-archive] reply failed', err);
+        }
+      }
       return;
     }
 
