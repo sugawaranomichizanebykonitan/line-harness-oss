@@ -134,3 +134,21 @@ export function lectureFinishedMessage(schoolName: string, date: string, time: s
     '他の学校は引き続き受付中です！'
   );
 }
+
+/**
+ * 初参加の人に送る、プロフィール登録の案内。
+ *
+ * Apps Script の sendLiffInvite と同じ2通。違うのはリンク先だけで、
+ * LIFF (LINEログイン必須) ではなく Worker が出す普通のWebフォームを指す。
+ */
+export function profileInviteMessages(schoolName: string, formUrl: string): string[] {
+  return [
+    '✨【ご利用ありがとうございます】\n\n' +
+      'WAHMSは初参加の方ですね！\n' +
+      '1分の簡単なアンケートにご協力ください📝\n\n' +
+      '回答完了後、自動的に\n' +
+      `「${schoolName}」のお申し込みが\n` +
+      '確定いたします✨',
+    `▼ アンケートはこちら(約1分)\n${formUrl}`,
+  ];
+}

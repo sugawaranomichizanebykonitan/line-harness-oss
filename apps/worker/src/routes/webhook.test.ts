@@ -295,22 +295,47 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
     fetchSpy.mockRestore();
   });
 
-  test('アーカイブ以外はこれまでどおり転送する', async () => {
-    wahmsAccounts();
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
-    const { forwarded } = await post([textEvent('今週の開催日')], fetchSpy);
-    expect(forwarded).toBe(true);
-    fetchSpy.mockRestore();
+  test('リッチメニューの応答はすべて Worker が返し、転送しない', async () => {
+    // 移行前は Apps Script が返していた4つ。転送すると同じものが2通届く。
+    for (const [text, expected] of [
+      ['今週の開催日', '今週の開催日'],
+      ['受講者の声', '受講者のリアルな声'],
+      ['よくある質問', 'Q. 本当に無料ですか？'],
+      ['ワムスとは？', 'SIX Academy『WAHMS』とは'],
+    ] as const) {
+      wahmsAccounts();
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+      lineClientMocks.replyMessage.mockClear();
+      const { forwarded } = await post([textEvent(text)], fetchSpy);
+      expect(forwarded, text).toBe(false);
+      expect(lineClientMocks.replyMessage, text).toHaveBeenCalledTimes(1);
+      const [, messages] = lineClientMocks.replyMessage.mock.calls[0];
+      expect(JSON.stringify(messages), text).toContain(expected);
+      fetchSpy.mockRestore();
+    }
   });
 
-  test('アーカイブ要求と他のイベントが混ざる場合は、取りこぼさないよう転送する', async () => {
+  test('1回のwebhookに複数のイベントが入っても、全部 Worker が返す', async () => {
     wahmsAccounts();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
     const { forwarded } = await post(
       [textEvent('マーケティング学校 アーカイブ'), textEvent('よくある質問')],
       fetchSpy,
     );
-    expect(forwarded).toBe(true);
+    expect(forwarded).toBe(false);
+    expect(lineClientMocks.replyMessage).toHaveBeenCalledTimes(2);
+    fetchSpy.mockRestore();
+  });
+
+  test('WAHMS と関係のない文章には答えず、転送もしない', async () => {
+    // Apps Script も知らない文言には何も返さない。転送しても何も起きない。
+    wahmsAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await post([textEvent('ありがとうございました！')], fetchSpy);
+    expect(forwarded).toBe(false);
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });
 
@@ -335,11 +360,16 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
         return null;
       },
       all: async () => ({
-        results: sql.includes('FROM account_settings') && zoom
+        results: sql.includes('FROM account_settings')
           ? [
-              { key: 'wahms_zoom_url', value: 'https://zoom.test/j/1' },
-              { key: 'wahms_zoom_id', value: '4891469109' },
-              { key: 'wahms_zoom_password', value: 'whams' },
+              { key: 'wahms_survey_form_url', value: 'https://wahms.test/survey' },
+              ...(zoom
+                ? [
+                    { key: 'wahms_zoom_url', value: 'https://zoom.test/j/1' },
+                    { key: 'wahms_zoom_id', value: '4891469109' },
+                    { key: 'wahms_zoom_password', value: 'whams' },
+                  ]
+                : []),
             ]
           : [],
       }),
@@ -380,13 +410,18 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
     fetchSpy.mockRestore();
   });
 
-  test('初参加の人は Apps Script に任せる（初回アンケートの案内があるため）', async () => {
+  test('初参加の人にはプロフィール登録の案内を返す', async () => {
+    // 移行前はここで Apps Script が LIFF へ案内していた。Worker が自前の
+    // フォームを持ったので、申込の最初から最後までこちらで完結する。
     wahmsAccounts();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
     lineClientMocks.replyMessage.mockClear();
     const { forwarded } = await postBooking('8月25日マーケティング学校に申し込む', bookingDb({ repeat: false }), fetchSpy);
-    expect(forwarded).toBe(true);
-    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
+    expect(forwarded).toBe(false);
+    expect(lineClientMocks.replyMessage).toHaveBeenCalledTimes(1);
+    const [, messages] = lineClientMocks.replyMessage.mock.calls[0];
+    expect(messages[0].text).toContain('WAHMSは初参加の方ですね！');
+    expect(messages[1].text).toContain('https://wahms.test/profile?t=');
     fetchSpy.mockRestore();
   });
 
@@ -447,7 +482,8 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
     fetchSpy.mockRestore();
   });
 
-  test('mirrors a signed WAHMS payload to the existing Apps Script endpoint', async () => {
+  test('返すものが無いときは Apps Script を呼ばない', async () => {
+    // 転送そのものをやめたので、素通しの中継は起きない。
     vi.mocked(verifySignature).mockResolvedValue(true);
     vi.mocked(getLineAccounts).mockResolvedValue([
       {
@@ -460,46 +496,40 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
       } as never,
     ]);
 
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(null, { status: 200 }),
-    );
-    const executionCtx = {
-      waitUntil: vi.fn(),
-      passThroughOnException: vi.fn(),
-      props: {},
-    } as unknown as ExecutionContext;
-    const rawBody = JSON.stringify({ destination: 'wahms', events: [] });
-
-    const res = await setupApp().request(
-      '/webhook',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Line-Signature': 'A'.repeat(43) + '=',
-        },
-        body: rawBody,
-      },
-      {
-        ...baseEnv,
-        WAHMS_LEGACY_LINE_ACCOUNT_ID: 'wahms-account',
-        WAHMS_LEGACY_WEBHOOK_URL: 'https://script.google.test/exec',
-      },
-      executionCtx,
-    );
-
-    expect(res.status).toBe(200);
-    expect(executionCtx.waitUntil).toHaveBeenCalledTimes(2);
-    const bridge = vi.mocked(executionCtx.waitUntil).mock.calls[1]?.[0] as Promise<unknown>;
-    await bridge;
-    expect(fetchSpy).toHaveBeenCalledWith(
-      'https://script.google.test/exec',
-      expect.objectContaining({ method: 'POST', body: rawBody }),
-    );
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    const { forwarded } = await post([], fetchSpy);
+    expect(forwarded).toBe(false);
     fetchSpy.mockRestore();
   });
 
-  test('records WAHMS text but leaves the one-time reply token exclusively to GAS', async () => {
+  test('友だち追加には今週のカレンダーを返す', async () => {
+    wahmsAccounts();
+    vi.mocked(upsertFriend).mockResolvedValue({
+      id: 'friend-1',
+      line_user_id: 'Unew',
+      // ref_code があると紹介リンクの解決待ちに入らない。この検証の対象外。
+      ref_code: 'ref-1',
+      first_followed_at: '2026-08-26T20:00:00.000+09:00',
+      created_at: '2026-08-26T20:00:00.000+09:00',
+    } as never);
+    vi.mocked(getEntryRouteByRefCode).mockResolvedValue(null as never);
+    vi.mocked(getScenarios).mockResolvedValue([] as never);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await post(
+      [{ type: 'follow', replyToken: 'reply-token', source: { type: 'user', userId: 'Unew' } }],
+      fetchSpy,
+    );
+    expect(forwarded).toBe(false);
+    expect(lineClientMocks.replyMessage).toHaveBeenCalledTimes(1);
+    const [, messages] = lineClientMocks.replyMessage.mock.calls[0];
+    expect(messages[0].type).toBe('flex');
+    expect(messages[0].altText).toContain('WAHMSへようこそ');
+    fetchSpy.mockRestore();
+  });
+
+  test('Worker が応答を組み立てられなかったら Apps Script へ渡す', async () => {
+    // ここが抜けると「押したのに何も返ってこない」になる。最後の受け皿。
     vi.mocked(verifySignature).mockResolvedValue(true);
     vi.mocked(jstNow).mockReturnValue('2026-08-20T15:45:12.000+09:00');
     vi.mocked(getLineAccounts).mockResolvedValue([
@@ -527,10 +557,8 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
       updated_at: '2026-08-20T15:00:00.000+09:00',
     });
 
-    const stmt = {
-      bind: vi.fn(),
-      run: vi.fn().mockResolvedValue({}),
-    };
+    // D1 が all() を持たない = 開催予定を引けずに落ちる、という壊れ方。
+    const stmt = { bind: vi.fn(), run: vi.fn().mockResolvedValue({}) };
     stmt.bind.mockReturnValue(stmt);
     const db = { prepare: vi.fn().mockReturnValue(stmt) } as unknown as D1Database;
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
@@ -575,8 +603,6 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
       vi.mocked(executionCtx.waitUntil).mock.calls.map(([promise]) => promise),
     );
     expect(upsertChatOnMessage).toHaveBeenCalledWith(db, 'friend-1');
-    expect(fireEvent).not.toHaveBeenCalled();
-    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledWith(
       'https://script.google.test/exec',
       expect.objectContaining({ method: 'POST', body: rawBody }),

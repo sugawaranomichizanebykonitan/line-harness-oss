@@ -18,6 +18,9 @@ const ALLOWED = [
   // 受講者に配るURLは英数字だけにしている。
   /^\/survey(?:\/[A-Za-z0-9_-]+)?$/,
   /^\/api\/public\/wahms-survey$/,
+  // 初参加者のプロフィール登録。/profile と /profile/thanks。
+  /^\/profile(?:\/thanks)?$/,
+  /^\/api\/public\/wahms-profile$/,
 ];
 
 export default {
