@@ -40,3 +40,29 @@
 - 「今の進捗を全体像から整理するとこれ」
 - 「次のタスクはこれ」
 
+
+## Cloudflare の認証
+
+本番のリソースは **Cloudflare アカウント `9347b348f3527ba2f9c7e3ce99681f5a`**
+(`gdn.hinata.kubo@gmail.com`) にある。`hinata.kubo@guardian-inc.co.jp` は
+**別アカウント**で、こちらからは触れない (2026-08-25に実測。Authentication error)。
+
+`wrangler login` のOAuthは期限切れになるうえ、ブラウザが別アカウントで
+開くと気づかないまま失敗する。APIトークンを使う。
+
+```bash
+export CLOUDFLARE_API_TOKEN=$(cat ~/.line-harness/cf-api-token)
+```
+
+トークンは `~/.line-harness/cf-api-token` (600)。Git には置かない。
+権限は Workers Scripts / Cloudflare Pages / D1 / R2 の Edit。
+失効したら dash.cloudflare.com/profile/api-tokens で作り直す。
+
+ビルド後の `dist/frei_career/wrangler.json` には `YOUR_DEV_ACCOUNT_ID` と
+`YOUR_DEV_D1_DATABASE_ID` が残るので、deploy 前に置換する。
+
+```bash
+sed -i '' -e 's/YOUR_DEV_ACCOUNT_ID/9347b348f3527ba2f9c7e3ce99681f5a/g' \
+  -e 's/YOUR_DEV_D1_DATABASE_ID/372d6241-f392-4ac3-a3ac-e3ad2721f8f3/g' \
+  dist/frei_career/wrangler.json
+```
