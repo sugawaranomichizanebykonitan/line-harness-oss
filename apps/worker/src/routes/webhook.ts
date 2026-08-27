@@ -58,8 +58,11 @@ async function forwardToLegacyWebhook(
       body: rawBody,
       redirect: 'follow',
     });
-    if (!response.ok) {
-      console.error(`[webhook] Legacy bridge returned ${response.status}`);
+    if (response.ok) {
+      // 成功も残す。転送が生きているかは、切り替え直後にいちばん知りたい情報。
+      console.log(`[forward] ${response.status} -> ${new URL(url).host}`);
+    } else {
+      console.error(`[forward] FAILED ${response.status} -> ${url}`);
     }
   } catch (err) {
     // The new CRM still records the event even if the legacy automation is
