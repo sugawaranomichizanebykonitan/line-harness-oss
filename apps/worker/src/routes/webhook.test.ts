@@ -611,6 +611,159 @@ describe('POST /webhook — WAHMS legacy bridge', () => {
   });
 });
 
+describe('POST /webhook — 既存ツールとの並走 (mirror)', () => {
+  // Lステップ等がすでに入っているアカウントを引き受けるための経路。
+  // LINE の Webhook URL はアカウントに1つしか設定できないので、こちらが前段に
+  // 立って生のリクエストをそのまま渡す。
+  //
+  // ここを間違えると相手の運用が止まる。壊れやすいのは3点。
+  //   1. 署名ヘッダを渡し忘れる → 転送先が全部401になる
+  //   2. こちらが replyToken を使う → 相手の返信が「使用済み」で失敗する
+  //   3. 記録まで止める → 引き受ける意味が無くなる
+
+  const FORWARD_URL = 'https://cb.lmes.test/line/callback/add/1';
+
+  function mirrorAccounts({ mode = 'always' as string | null, url = FORWARD_URL as string | null } = {}) {
+    vi.mocked(verifySignature).mockResolvedValue(true);
+    vi.mocked(getFriendByLineUserId).mockResolvedValue({
+      id: 'friend-1',
+      line_user_id: 'Umirror',
+      line_account_id: 'mirror-account',
+      is_following: 1,
+    } as never);
+    vi.mocked(getLineAccounts).mockResolvedValue([
+      {
+        id: 'mirror-account',
+        channel_id: 'mirror-channel',
+        channel_access_token: 'mirror-token',
+        // 署名検証をモックしているので、環境変数と同じ値にして
+        // 「このアカウントが送り主」と判定させる。
+        channel_secret: 'env-default-secret',
+        name: 'みらイフ',
+        is_active: 1,
+        forward_webhook_url: url,
+        forward_mode: mode,
+      } as never,
+    ]);
+  }
+
+  function mirrorDb() {
+    const stmt = {
+      bind: vi.fn(),
+      run: vi.fn().mockResolvedValue({ success: true }),
+      first: vi.fn().mockResolvedValue(null),
+      all: vi.fn().mockResolvedValue({ results: [] }),
+    };
+    stmt.bind.mockReturnValue(stmt);
+    return { prepare: vi.fn().mockReturnValue(stmt) } as unknown as D1Database;
+  }
+
+  async function postMirror(events: unknown[], fetchSpy: { mock: { calls: unknown[][] } }) {
+    const executionCtx = { waitUntil: vi.fn(), passThroughOnException: vi.fn(), props: {} } as unknown as ExecutionContext;
+    const rawBody = JSON.stringify({ destination: 'mirror', events });
+    const res = await setupApp().request(
+      '/webhook',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Line-Signature': 'S'.repeat(43) + '=' },
+        body: rawBody,
+      },
+      { ...baseEnv, DB: mirrorDb() },
+      executionCtx,
+    );
+    for (const call of vi.mocked(executionCtx.waitUntil).mock.calls) {
+      await (call[0] as Promise<unknown>).catch(() => {});
+    }
+    const forwarded = fetchSpy.mock.calls.filter((c) => String(c[0]).includes('cb.lmes.test'));
+    return { res, rawBody, forwarded };
+  }
+
+  const textEvent = (text: string) => ({
+    type: 'message',
+    replyToken: 'reply-token',
+    source: { type: 'user', userId: 'Umirror' },
+    message: { type: 'text', id: 'm1', text },
+  });
+
+  test('受け取ったものを1バイトも変えずに渡し、署名ヘッダも一緒に渡す', async () => {
+    mirrorAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const { forwarded, rawBody } = await postMirror([textEvent('こんにちは')], fetchSpy);
+    expect(forwarded).toHaveLength(1);
+    const [, init] = forwarded[0] as [string, RequestInit];
+    expect(init.body).toBe(rawBody);
+    expect((init.headers as Record<string, string>)['X-Line-Signature']).toBe('S'.repeat(43) + '=');
+    fetchSpy.mockRestore();
+  });
+
+  test('こちらからは絶対に返信しない（replyToken を奪わない）', async () => {
+    mirrorAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    lineClientMocks.pushMessage.mockClear();
+    await postMirror([textEvent('今週の開催日'), textEvent('よくある質問')], fetchSpy);
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
+    expect(lineClientMocks.pushMessage).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  test('友だち追加も記録するが、あいさつは送らない', async () => {
+    mirrorAccounts();
+    vi.mocked(upsertFriend).mockResolvedValue({
+      id: 'friend-1', line_user_id: 'Umirror', ref_code: null,
+      first_followed_at: '2026-08-27T10:00:00.000+09:00',
+      created_at: '2026-08-27T10:00:00.000+09:00',
+    } as never);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await postMirror(
+      [{ type: 'follow', replyToken: 'reply-token', source: { type: 'user', userId: 'Umirror' } }],
+      fetchSpy,
+    );
+    expect(upsertFriend).toHaveBeenCalled();
+    expect(forwarded).toHaveLength(1);
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  test('リッチメニューのタップ (postback) も渡すだけ', async () => {
+    mirrorAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    lineClientMocks.replyMessage.mockClear();
+    const { forwarded } = await postMirror(
+      [{ type: 'postback', replyToken: 'reply-token', source: { type: 'user', userId: 'Umirror' }, postback: { data: 'action=x' } }],
+      fetchSpy,
+    );
+    expect(forwarded).toHaveLength(1);
+    expect(lineClientMocks.replyMessage).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  test('転送先が設定されていなければ、並走モードにはならない', async () => {
+    mirrorAccounts({ mode: 'always', url: null });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const { forwarded } = await postMirror([textEvent('こんにちは')], fetchSpy);
+    expect(forwarded).toHaveLength(0);
+    fetchSpy.mockRestore();
+  });
+
+  test('モードが未設定のアカウントは、どこにも転送しない', async () => {
+    mirrorAccounts({ mode: null });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const { forwarded } = await postMirror([textEvent('こんにちは')], fetchSpy);
+    expect(forwarded).toHaveLength(0);
+    fetchSpy.mockRestore();
+  });
+
+  test('転送先が落ちていても、こちらは200を返す（LINE側でエラーにしない）', async () => {
+    mirrorAccounts();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Lステップ down'));
+    const { res } = await postMirror([textEvent('こんにちは')], fetchSpy as never);
+    expect(res.status).toBe(200);
+    fetchSpy.mockRestore();
+  });
+});
+
 describe('POST /webhook — postback events', () => {
   test('fires postback_received with postback.data so IF-THEN automations run on rich menu taps', async () => {
     vi.mocked(verifySignature).mockResolvedValue(true);

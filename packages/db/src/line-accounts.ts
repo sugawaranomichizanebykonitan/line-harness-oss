@@ -20,6 +20,10 @@ export interface LineAccount {
   og_site_name: string | null;
   og_default_image_url: string | null;
   og_default_description: string | null;
+  /** 既存ツールへ生のWebhookを渡す先。1アカウントに1つしか設定できないLINEの制約を回避する。 */
+  forward_webhook_url: string | null;
+  /** 'always' = 記録のみで全部転送 / 'fallback' = 返せなかったときだけ転送 / null = 転送しない */
+  forward_mode: string | null;
   created_at: string;
   updated_at: string;
 }

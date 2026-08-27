@@ -36,11 +36,25 @@ const webhook = new Hono<Env>();
 // 128 MB Cloudflare Workers memory ceiling.
 const MAX_WEBHOOK_BODY_SIZE = 1024 * 1024; // 1 MiB
 
-async function forwardToLegacyWebhook(url: string, rawBody: string): Promise<void> {
+/**
+ * 受け取った Webhook を、そのまま既存ツールへ渡す。
+ *
+ * **署名ヘッダを必ず一緒に渡す。** 本文を1バイトも変えずに転送しているので、
+ * 受け取った側で LINE の署名検証がそのまま通る。Apps Script は検証していな
+ * かったので今まで気づかなかったが、Lステップのような普通のツールは検証する。
+ * ここを落とすと転送先が全部 401 を返して、相手の運用が止まる。
+ */
+async function forwardToLegacyWebhook(
+  url: string,
+  rawBody: string,
+  signature?: string,
+): Promise<void> {
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (signature) headers['X-Line-Signature'] = signature;
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: rawBody,
       redirect: 'follow',
     });
@@ -134,6 +148,8 @@ webhook.post('/webhook', async (c) => {
   // Slow path: iterate DB-registered accounts for genuinely multi-account installs.
   let channelAccessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
   let matchedAccountId: string | null = null;
+  // 転送設定はアカウント行に持たせているので、IDだけでなく行そのものを控える。
+  let matchedAccount: Awaited<ReturnType<typeof getLineAccounts>>[number] | null = null;
   let valid = false;
 
   const envSecret = c.env.LINE_CHANNEL_SECRET;
@@ -147,6 +163,7 @@ webhook.post('/webhook', async (c) => {
       if (main) {
         channelAccessToken = main.channel_access_token;
         matchedAccountId = main.id;
+        matchedAccount = main;
       }
     }
   }
@@ -160,6 +177,7 @@ webhook.post('/webhook', async (c) => {
       if (isValid) {
         channelAccessToken = account.channel_access_token;
         matchedAccountId = account.id;
+        matchedAccount = account;
         valid = true;
         break;
       }
@@ -193,6 +211,18 @@ webhook.post('/webhook', async (c) => {
   // 「返せたか」だけで転送を決める。
   const legacyFallback = { needed: false };
 
+  // 既存ツールと並走するアカウント。Lステップなどが応答を担当していて、
+  // こちらは記録だけを持つ。返信は一切しない (replyToken は一度しか使えない)。
+  const mirrorOnly = matchedAccount?.forward_mode === 'always'
+    && Boolean(matchedAccount?.forward_webhook_url);
+
+  // 既存ツールへ渡すのが先。こちらの処理を待たせると、利用者から見て
+  // 相手ツールの返信が遅れる。
+  if (mirrorOnly && matchedAccount?.forward_webhook_url) {
+    const url = matchedAccount.forward_webhook_url;
+    c.executionCtx.waitUntil(forwardToLegacyWebhook(url, rawBody, signature));
+  }
+
   // 非同期処理 — LINE は ~1s 以内のレスポンスを要求
   const processingPromise = (async () => {
     const proxyDispatch: HarnessProxyDispatch = (request) =>
@@ -211,6 +241,7 @@ webhook.post('/webhook', async (c) => {
           proxyDispatch,
           legacyReplyOwner,
           legacyFallback,
+          mirrorOnly,
         );
       } catch (err) {
         console.error('Error handling webhook event:', err);
@@ -224,8 +255,13 @@ webhook.post('/webhook', async (c) => {
   // profile/lecture surveys, spreadsheet history, reminders, FAQ/archive rich
   // menu replies). Mirror the signed WAHMS payload after CRM ingestion so both
   // the new unified management screen and the established operation continue.
-  if (legacyReplyOwner && c.env.WAHMS_LEGACY_WEBHOOK_URL) {
-    const legacyUrl = c.env.WAHMS_LEGACY_WEBHOOK_URL;
+  // 返せなかったときだけ渡す経路。転送先はアカウント行を先に見て、無ければ
+  // 従来の環境変数を使う (WAHMS は環境変数のまま動く)。
+  const fallbackUrl = matchedAccount?.forward_mode === 'fallback'
+    ? matchedAccount.forward_webhook_url
+    : c.env.WAHMS_LEGACY_WEBHOOK_URL;
+  if (!mirrorOnly && legacyReplyOwner && fallbackUrl) {
+    const legacyUrl = fallbackUrl;
     c.executionCtx.waitUntil(
       (async () => {
         // 返せたかが確定するまで待つ。replyToken は約1分有効なので、ここで
@@ -233,7 +269,7 @@ webhook.post('/webhook', async (c) => {
         await processingPromise;
         if (!legacyFallback.needed) return;
         console.warn('[wahms] falling back to Apps Script');
-        await forwardToLegacyWebhook(legacyUrl, rawBody);
+        await forwardToLegacyWebhook(legacyUrl, rawBody, signature);
       })(),
     );
   }
@@ -253,6 +289,7 @@ async function handleEvent(
   proxyDispatch?: HarnessProxyDispatch,
   legacyReplyOwner = false,
   legacyFallback: { needed: boolean } = { needed: false },
+  mirrorOnly = false,
 ): Promise<void> {
   if (event.type === 'follow') {
     const userId =
@@ -320,6 +357,14 @@ async function handleEvent(
       metadata: { lineAccountId },
       occurredAt: firstFollowedAt,
     });
+
+    // 既存ツールが応答を担当しているアカウントは、ここで終わり。
+    // 友だちの記録は済ませたので管理画面には出るが、あいさつもシナリオ配信も
+    // こちらからは出さない。二重に届いてしまうため。
+    if (mirrorOnly) {
+      console.log(`[mirror] follow recorded ${userId}`);
+      return;
+    }
 
     // Resolve referral link (entry_route) for this friend.
     // /auth/callback (OAuth path) writes friends.ref_code in parallel with
@@ -467,6 +512,9 @@ async function handleEvent(
       console.error('Failed to log incoming postback', err);
     }
 
+    // 既存ツールが応答を担当しているアカウントは、記録だけで終わり。
+    if (mirrorOnly) return;
+
     // postback data を auto_replies にマッチさせて返信 (テキスト経路と共通)。
     // silent + automation で「返信なしでタグだけ付ける」構成もここで成立する。
     const { matched: postbackMatched, replyTokenConsumed: postbackReplyTokenConsumed } =
@@ -611,6 +659,13 @@ async function handleEvent(
       metadata: { messageType: 'text' },
       occurredAt: now,
     });
+
+    // 既存ツールが応答を担当しているアカウントは、記録だけで終わり。
+    // replyToken は一度しか使えないので、こちらが触ると相手の返信が失敗する。
+    if (mirrorOnly) {
+      await upsertChatOnMessage(db, friend.id);
+      return;
+    }
 
     // WAHMS の応答は Worker が返す。同じイベントは Apps Script にも流せるが、
     // 一度きりの replyToken を使えるのは片方だけなので、返せたときは転送しない
