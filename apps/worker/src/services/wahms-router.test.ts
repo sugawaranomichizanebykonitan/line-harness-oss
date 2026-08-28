@@ -21,6 +21,7 @@ const FORM = { key: 'wahms_survey_form_url', value: 'https://wahms.pages.dev/sur
 
 type Options = {
   slot?: boolean;
+  suspended?: boolean;
   finished?: boolean;
   profileDone?: boolean;
   zoom?: boolean;
@@ -30,7 +31,7 @@ type Options = {
 
 function fakeDb(sqls: string[], o: Options = {}) {
   const {
-    slot = true, finished = false, profileDone = true,
+    slot = true, suspended = false, finished = false, profileDone = true,
     zoom = true, formUrl = true, archives = true,
   } = o;
   const settings = [...(zoom ? ZOOM : []), ...(formUrl ? [FORM] : [])];
@@ -43,6 +44,8 @@ function fakeDb(sqls: string[], o: Options = {}) {
             // 終了済みを探す問い合わせは「今日より前」を条件に持つ。
             const wantsPast = sql.includes("< DATE('now'");
             if (wantsPast) return finished ? { ...SLOT, eventDate: '2026-05-13' } : null;
+            // 受付停止を探す問い合わせは is_active = 0 を条件に持つ。
+            if (sql.includes('s.is_active = 0')) return suspended ? SLOT : null;
             return slot ? SLOT : null;
           }
           if (sql.includes('FROM wahms_participants')) return profileDone ? { ok: 1 } : null;
@@ -164,6 +167,28 @@ describe('申込', () => {
     const sqls: string[] = [];
     await call('8月26日WEB学校に申し込む', { profileDone: false }, sqls);
     expect(sqls.some((s) => s.includes('INSERT INTO wahms_applications'))).toBe(true);
+  });
+
+  test('延期になった回には延期の案内を返し、Apps Script に流さない', async () => {
+    // ここで拾わないと「開催予定に無い回」として転送され、向こうの辞書には
+    // まだ残っているので申込が通ってしまう。
+    const sqls: string[] = [];
+    const r = await call('8月26日WEB学校に申し込む', { slot: false, suspended: true }, sqls);
+    expect(r.kind).toBe('handled');
+    if (r.kind !== 'handled') return;
+    const text = (r.messages[0] as { text: string }).text;
+    expect(text).toContain('延期となりました');
+    expect(text).toContain('8月26日（水）20:30〜22:00');
+    expect(text).not.toContain('終了');
+    // 延期の回は申込として記録しない。
+    expect(sqls.some((s) => s.includes('INSERT INTO wahms_applications'))).toBe(false);
+  });
+
+  test('延期の案内は「終了しました」と言わない', async () => {
+    // まだ開催前なのに「終了」と返すと、次回を待っている人が離れる。
+    const r = await call('8月26日WEB学校に申し込む', { slot: false, suspended: true });
+    if (r.kind !== 'handled') throw new Error('handled ではない');
+    expect((r.messages[0] as { text: string }).text).toContain('日程が決まり次第');
   });
 
   test('終了した回には終了の案内を返す', async () => {

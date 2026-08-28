@@ -12,11 +12,14 @@
 
 import type { Message } from '@line-crm/line-sdk';
 import { parseArchiveRequest, buildArchiveReply } from './wahms-archive.js';
-import { parseBookingRequest, findLectureSlot, findFinishedLectureSlot, recordBooking } from './wahms-booking.js';
+import {
+  parseBookingRequest, findLectureSlot, findFinishedLectureSlot,
+  findSuspendedLectureSlot, recordBooking,
+} from './wahms-booking.js';
 import { weeklyScheduleFlex, testimonialsFlex } from './wahms-flex.js';
 import {
   loadZoomSettings, bookingConfirmMessages, profileInviteMessages,
-  lectureFinishedMessage, japaneseDate,
+  lectureFinishedMessage, lecturePostponedMessage, japaneseDate,
 } from './wahms-messages.js';
 import { createProfileInvite, hasCompletedProfile } from './wahms-profile.js';
 import { loadWeeklySchedule } from './wahms-schedule.js';
@@ -133,6 +136,17 @@ export async function buildWahmsReply(input: RouteInput): Promise<RouteOutcome> 
   const slot = await findLectureSlot(db, lineAccountId, booking);
 
   if (!slot) {
+    // 受付を止めた回 (延期) なら、その旨を返す。ここで拾わないと
+    // 「開催予定に無い回」として Apps Script へ流れ、向こうで申込が通る。
+    const suspended = await findSuspendedLectureSlot(db, lineAccountId, booking);
+    if (suspended) {
+      return handled([text(lecturePostponedMessage(
+        suspended.schoolName,
+        japaneseDate(suspended.eventDate),
+        `${suspended.startTime}〜${suspended.endTime}`,
+      ))]);
+    }
+
     // 開催予定に無い。過去に同じ日付の回があれば「終了しました」を返す。
     const finished = await findFinishedLectureSlot(db, lineAccountId, booking);
     if (!finished) return fallback('slot-not-found');
