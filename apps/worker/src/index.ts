@@ -91,6 +91,7 @@ import adminUpdate from './routes/admin-update.js';
 import { mediaInquiries } from './routes/media-inquiries.js';
 import { wahms } from './routes/wahms.js';
 import { publicSurvey } from './routes/wahms-public-survey.js';
+import { profileForm } from './routes/wahms-profile-form.js';
 import { isLinkPreviewBot } from './lib/og-bot.js';
 import { buildOgHtml } from './lib/og-html.js';
 import {
@@ -215,6 +216,7 @@ app.route('/', affiliateSelfRoutes);
 app.route('/', mediaInquiries);
 app.route('/', wahms);
 app.route('/', publicSurvey);
+app.route('/', profileForm);
 
 // Mount route groups — Round 3
 app.route('/', webhooks);

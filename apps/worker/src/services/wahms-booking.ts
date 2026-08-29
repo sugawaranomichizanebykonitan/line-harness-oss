@@ -72,6 +72,82 @@ export async function findLectureSlot(
     .first<LectureSlot>();
 }
 
+/**
+ * すでに終わった回を引く。「終了しました」と返すために使う。
+ *
+ * findLectureSlot は今日以降しか見ないので、過去の回はこちらで探す。
+ * 同じ月日が何年分あっても、直近に終わったものを採る。
+ */
+export async function findFinishedLectureSlot(
+  db: D1Database,
+  lineAccountId: string,
+  req: BookingRequest,
+): Promise<LectureSlot | null> {
+  const mmdd = `${String(req.month).padStart(2, '0')}-${String(req.day).padStart(2, '0')}`;
+  return db
+    .prepare(
+      `SELECT s.id AS slotId,
+              e.id AS eventId,
+              e.name AS schoolName,
+              DATE(s.starts_at, '+9 hours') AS eventDate,
+              SUBSTR(TIME(s.starts_at, '+9 hours'), 1, 5) AS startTime,
+              SUBSTR(TIME(s.ends_at, '+9 hours'), 1, 5) AS endTime,
+              s.sequence_label AS lectureLabel,
+              s.title AS theme
+         FROM event_slots s
+         JOIN events e ON e.id = s.event_id
+        WHERE e.line_account_id = ?
+          AND s.deleted_at IS NULL
+          AND SUBSTR(DATE(s.starts_at, '+9 hours'), 6) = ?
+          AND e.name LIKE '%' || ? || '%'
+          AND DATE(s.starts_at, '+9 hours') < DATE('now', '+9 hours')
+        ORDER BY s.starts_at DESC
+        LIMIT 1`,
+    )
+    .bind(lineAccountId, mmdd, req.school)
+    .first<LectureSlot>();
+}
+
+/**
+ * 受付を止めた回を引く。「延期になりました」と返すために使う。
+ *
+ * 延期は `event_slots.is_active = 0` で表す。findLectureSlot は is_active = 1 の
+ * ものしか見ないので、止めた回はここで拾う。
+ *
+ * これが無いと、止めた瞬間に「開催予定に無い回」として Apps Script へ流れ、
+ * 向こうの辞書にはまだ残っているので申込が通ってしまう。
+ */
+export async function findSuspendedLectureSlot(
+  db: D1Database,
+  lineAccountId: string,
+  req: BookingRequest,
+): Promise<LectureSlot | null> {
+  const mmdd = `${String(req.month).padStart(2, '0')}-${String(req.day).padStart(2, '0')}`;
+  return db
+    .prepare(
+      `SELECT s.id AS slotId,
+              e.id AS eventId,
+              e.name AS schoolName,
+              DATE(s.starts_at, '+9 hours') AS eventDate,
+              SUBSTR(TIME(s.starts_at, '+9 hours'), 1, 5) AS startTime,
+              SUBSTR(TIME(s.ends_at, '+9 hours'), 1, 5) AS endTime,
+              s.sequence_label AS lectureLabel,
+              s.title AS theme
+         FROM event_slots s
+         JOIN events e ON e.id = s.event_id
+        WHERE e.line_account_id = ?
+          AND s.deleted_at IS NULL
+          AND s.is_active = 0
+          AND SUBSTR(DATE(s.starts_at, '+9 hours'), 6) = ?
+          AND e.name LIKE '%' || ? || '%'
+          AND DATE(s.starts_at, '+9 hours') >= DATE('now', '+9 hours')
+        ORDER BY s.starts_at
+        LIMIT 1`,
+    )
+    .bind(lineAccountId, mmdd, req.school)
+    .first<LectureSlot>();
+}
+
 export type RecordResult = { recorded: boolean; reason: 'created' | 'duplicate' | 'no_friend' };
 
 /**

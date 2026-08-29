@@ -2198,7 +2198,7 @@ export type WahmsOverview = {
   surveys: Array<Record<string, unknown> & { id: string; responded_at?: string; school_name: string; satisfaction?: number; value_rating?: string; next_intent?: string; question?: string; answer?: string; respondent_name?: string; response_status: 'none' | 'pending' | 'completed'; reply_skipped?: number }>
   archives: Array<Record<string, unknown> & { id: string; school_name: string; lecture_number?: string; theme?: string; held_on?: string; youtube_url?: string }>
   // 開催予定 (events / event_slots)。申込が0件の日でも時間とテーマを出すために使う。
-  lectures: Array<{ school_name: string; event_date: string; start_time: string; end_time: string; lecture_label?: string; theme?: string }>
+  lectures: Array<{ slot_id: string; school_name: string; event_date: string; start_time: string; end_time: string; lecture_label?: string; theme?: string; is_active: number }>
   deliveryLogs: Array<Record<string, unknown> & { id: string; delivery_type: string; title: string; success_count: number; failure_count: number; created_at: string }>
 }
 
@@ -2234,4 +2234,24 @@ export const wahmsApi = {
     }),
   deleteArchive: (accountId: string, id: string) =>
     fetchApi<ApiResponse<null>>(`/api/wahms/archives/${id}?accountId=${encodeURIComponent(accountId)}`, { method: 'DELETE' }),
+
+  // ─── 開催予定の操作（延期・休講・繰越） ───────────────────────
+  // 受付を止めると、その日のリマインドも一緒に止まる。Worker側でまとめている。
+  suspendLecture: (accountId: string, slotId: string) =>
+    fetchApi<ApiResponse<{ lecture: string; applicants: number; remindersStopped: number }>>(
+      `/api/wahms/lectures/${slotId}/suspend?accountId=${encodeURIComponent(accountId)}`, { method: 'POST' }),
+  resumeLecture: (accountId: string, slotId: string) =>
+    fetchApi<ApiResponse<{ lecture: string; remindersRearmed: number }>>(
+      `/api/wahms/lectures/${slotId}/resume?accountId=${encodeURIComponent(accountId)}`, { method: 'POST' }),
+  // direction='back' で1週間ぶん戻せる。押し間違いを取り消すため。
+  shiftLectureWeek: (accountId: string, slotId: string, direction: 'forward' | 'back' = 'forward') =>
+    fetchApi<ApiResponse<{ lecture: string; newDate: string; shiftedSlots: number; movedApplications: number; direction: string }>>(
+      `/api/wahms/lectures/${slotId}/shift-week?accountId=${encodeURIComponent(accountId)}&direction=${direction}`, { method: 'POST' }),
+  // testRecipientId を渡さない＝申込者全員へ。Worker側が confirmBroadcast を
+  // 必須にしているので、全員へ送るときだけ明示する。
+  notifyPostponed: (accountId: string, slotId: string, testRecipientId?: string) =>
+    fetchApi<ApiResponse<{ targetCount: number; success: number; failure: number; text: string }>>(
+      `/api/wahms/lectures/${slotId}/notify-postponed?accountId=${encodeURIComponent(accountId)}`, {
+        method: 'POST', body: JSON.stringify({ testRecipientId, confirmBroadcast: !testRecipientId }),
+      }),
 }

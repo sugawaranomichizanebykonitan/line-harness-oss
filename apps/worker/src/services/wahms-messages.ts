@@ -134,3 +134,38 @@ export function lectureFinishedMessage(schoolName: string, date: string, time: s
     '他の学校は引き続き受付中です！'
   );
 }
+
+/**
+ * 初参加の人に送る、プロフィール登録の案内。
+ *
+ * Apps Script の sendLiffInvite と同じ2通。違うのはリンク先だけで、
+ * LIFF (LINEログイン必須) ではなく Worker が出す普通のWebフォームを指す。
+ */
+export function profileInviteMessages(schoolName: string, formUrl: string): string[] {
+  return [
+    '✨【ご利用ありがとうございます】\n\n' +
+      'WAHMSは初参加の方ですね！\n' +
+      '1分の簡単なアンケートにご協力ください📝\n\n' +
+      '回答完了後、自動的に\n' +
+      `「${schoolName}」のお申し込みが\n` +
+      '確定いたします✨',
+    `▼ アンケートはこちら(約1分)\n${formUrl}`,
+  ];
+}
+
+/**
+ * 延期になった回に申し込まれたとき。
+ *
+ * 終了済みの案内 (lectureFinishedMessage) と分けている。「終了しました」と
+ * 返すと、まだ開催前なのに終わったと受け取られてしまう。
+ */
+export function lecturePostponedMessage(schoolName: string, date: string, time: string): string {
+  return (
+    '⚠️ 申し訳ございません。\n\n' +
+    `${schoolName}\n（${date}${time}）は\n` +
+    '諸般の事情により延期となりました。\n\n' +
+    'あらためて日程が決まり次第、\n' +
+    'ご案内いたします。\n\n' +
+    '他の学校は引き続き受付中です🌱'
+  );
+}

@@ -25,9 +25,7 @@ import { replyViaHarnessProxy } from '../services/line-proxy-send.js';
 import type { HarnessProxyDispatch } from '../services/line-proxy-send.js';
 import { dispatchLineProxyLocally } from '../services/local-line-proxy.js';
 
-import { parseArchiveRequest, buildArchiveReply } from '../services/wahms-archive.js';
-import { parseBookingRequest, findLectureSlot, recordBooking } from '../services/wahms-booking.js';
-import { loadZoomSettings, bookingConfirmMessages } from '../services/wahms-messages.js';
+import { buildWahmsReply, welcomeMessages } from '../services/wahms-router.js';
 import { ensureWahmsParticipant } from '../services/wahms-participant.js';
 
 const webhook = new Hono<Env>();
@@ -38,16 +36,33 @@ const webhook = new Hono<Env>();
 // 128 MB Cloudflare Workers memory ceiling.
 const MAX_WEBHOOK_BODY_SIZE = 1024 * 1024; // 1 MiB
 
-async function forwardToLegacyWebhook(url: string, rawBody: string): Promise<void> {
+/**
+ * 受け取った Webhook を、そのまま既存ツールへ渡す。
+ *
+ * **署名ヘッダを必ず一緒に渡す。** 本文を1バイトも変えずに転送しているので、
+ * 受け取った側で LINE の署名検証がそのまま通る。Apps Script は検証していな
+ * かったので今まで気づかなかったが、Lステップのような普通のツールは検証する。
+ * ここを落とすと転送先が全部 401 を返して、相手の運用が止まる。
+ */
+async function forwardToLegacyWebhook(
+  url: string,
+  rawBody: string,
+  signature?: string,
+): Promise<void> {
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (signature) headers['X-Line-Signature'] = signature;
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: rawBody,
       redirect: 'follow',
     });
-    if (!response.ok) {
-      console.error(`[webhook] Legacy bridge returned ${response.status}`);
+    if (response.ok) {
+      // 成功も残す。転送が生きているかは、切り替え直後にいちばん知りたい情報。
+      console.log(`[forward] ${response.status} -> ${new URL(url).host}`);
+    } else {
+      console.error(`[forward] FAILED ${response.status} -> ${url}`);
     }
   } catch (err) {
     // The new CRM still records the event even if the legacy automation is
@@ -136,6 +151,8 @@ webhook.post('/webhook', async (c) => {
   // Slow path: iterate DB-registered accounts for genuinely multi-account installs.
   let channelAccessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
   let matchedAccountId: string | null = null;
+  // 転送設定はアカウント行に持たせているので、IDだけでなく行そのものを控える。
+  let matchedAccount: Awaited<ReturnType<typeof getLineAccounts>>[number] | null = null;
   let valid = false;
 
   const envSecret = c.env.LINE_CHANNEL_SECRET;
@@ -149,6 +166,7 @@ webhook.post('/webhook', async (c) => {
       if (main) {
         channelAccessToken = main.channel_access_token;
         matchedAccountId = main.id;
+        matchedAccount = main;
       }
     }
   }
@@ -162,6 +180,7 @@ webhook.post('/webhook', async (c) => {
       if (isValid) {
         channelAccessToken = account.channel_access_token;
         matchedAccountId = account.id;
+        matchedAccount = account;
         valid = true;
         break;
       }
@@ -188,45 +207,24 @@ webhook.post('/webhook', async (c) => {
     c.env.WAHMS_LEGACY_WEBHOOK_URL,
   );
 
-  // アーカイブ一覧は管理画面から登録するようになったので、Worker が D1 から
-  // 直接返す。Apps Script も同じイベントを受け取ると二重返信になるため、
-  // 「全イベントがアーカイブ要求のとき」だけ転送を止めて Worker が応答する。
+  // WAHMS の応答は Worker が返す。返せなかったものだけを Apps Script へ渡す。
   //
-  // 1回の webhook に他の種類のイベントが混ざっている場合は、取りこぼしを
-  // 避けて従来どおり丸ごと Apps Script へ渡し、Worker は応答しない。
-  // (LINE は利用者の1操作につき1イベントで送ってくるため、実運用では
-  //  ほぼ常に「アーカイブ要求のみ」になる)
-  const archiveRequests = legacyReplyOwner
-    ? body.events.filter(
-        (e) =>
-          e.type === 'message' &&
-          e.message?.type === 'text' &&
-          Boolean(parseArchiveRequest(e.message.text)),
-      )
-    : [];
-  const answerArchiveLocally =
-    archiveRequests.length > 0 && archiveRequests.length === body.events.length;
+  // 以前は機能ごとに「今回は Worker が返す / 返さない」を先に決めていて、
+  // 判定の外にある処理 (申込の記録) が一緒に落ちていた。判定は1か所に寄せ、
+  // 「返せたか」だけで転送を決める。
+  const legacyFallback = { needed: false };
 
-  // 申込も Worker が返せるようにする。ただし「返せたときだけ」転送を止める。
-  //
-  // 初参加の人には Apps Script が初回アンケートへ案内する処理があり、終了済みの
-  // 回には終了の案内を返す。そこまで作り込むより、Worker が確実に扱える場合
-  // (リピーター × 開催予定にある回 × Zoom設定あり) だけ引き取り、それ以外は
-  // 従来どおり Apps Script に任せるほうが安全。
-  //
-  // 判定は返信の成否そのもの。Worker が返せなかったら転送するので、こちらの
-  // 不具合が「申し込んでも返事が来ない」になることがない。
-  const bookingRequests = legacyReplyOwner
-    ? body.events.filter(
-        (e) =>
-          e.type === 'message' &&
-          e.message?.type === 'text' &&
-          Boolean(parseBookingRequest(e.message.text)),
-      )
-    : [];
-  const attemptBookingLocally =
-    bookingRequests.length > 0 && bookingRequests.length === body.events.length;
-  const bookingReplied = { done: false };
+  // 既存ツールと並走するアカウント。Lステップなどが応答を担当していて、
+  // こちらは記録だけを持つ。返信は一切しない (replyToken は一度しか使えない)。
+  const mirrorOnly = matchedAccount?.forward_mode === 'always'
+    && Boolean(matchedAccount?.forward_webhook_url);
+
+  // 既存ツールへ渡すのが先。こちらの処理を待たせると、利用者から見て
+  // 相手ツールの返信が遅れる。
+  if (mirrorOnly && matchedAccount?.forward_webhook_url) {
+    const url = matchedAccount.forward_webhook_url;
+    c.executionCtx.waitUntil(forwardToLegacyWebhook(url, rawBody, signature));
+  }
 
   // 非同期処理 — LINE は ~1s 以内のレスポンスを要求
   const processingPromise = (async () => {
@@ -245,9 +243,8 @@ webhook.post('/webhook', async (c) => {
           c.env.IMAGES,
           proxyDispatch,
           legacyReplyOwner,
-          answerArchiveLocally,
-          attemptBookingLocally,
-          bookingReplied,
+          legacyFallback,
+          mirrorOnly,
         );
       } catch (err) {
         console.error('Error handling webhook event:', err);
@@ -261,24 +258,21 @@ webhook.post('/webhook', async (c) => {
   // profile/lecture surveys, spreadsheet history, reminders, FAQ/archive rich
   // menu replies). Mirror the signed WAHMS payload after CRM ingestion so both
   // the new unified management screen and the established operation continue.
-  if (
-    matchedAccountId &&
-    c.env.WAHMS_LEGACY_LINE_ACCOUNT_ID === matchedAccountId &&
-    c.env.WAHMS_LEGACY_WEBHOOK_URL &&
-    // アーカイブ要求は Worker が返すので転送しない。転送すると Apps Script も
-    // 返してしまい、利用者に同じ一覧が2通届く。
-    !answerArchiveLocally
-  ) {
-    const legacyUrl = c.env.WAHMS_LEGACY_WEBHOOK_URL;
+  // 返せなかったときだけ渡す経路。転送先はアカウント行を先に見て、無ければ
+  // 従来の環境変数を使う (WAHMS は環境変数のまま動く)。
+  const fallbackUrl = matchedAccount?.forward_mode === 'fallback'
+    ? matchedAccount.forward_webhook_url
+    : c.env.WAHMS_LEGACY_WEBHOOK_URL;
+  if (!mirrorOnly && legacyReplyOwner && fallbackUrl) {
+    const legacyUrl = fallbackUrl;
     c.executionCtx.waitUntil(
       (async () => {
-        if (attemptBookingLocally) {
-          // 返信できたかが確定するまで待つ。replyToken は約1分有効なので、
-          // ここで待ってから転送しても Apps Script は返信できる。
-          await processingPromise;
-          if (bookingReplied.done) return;
-        }
-        await forwardToLegacyWebhook(legacyUrl, rawBody);
+        // 返せたかが確定するまで待つ。replyToken は約1分有効なので、ここで
+        // 待ってから転送しても Apps Script は返信できる。
+        await processingPromise;
+        if (!legacyFallback.needed) return;
+        console.warn('[wahms] falling back to Apps Script');
+        await forwardToLegacyWebhook(legacyUrl, rawBody, signature);
       })(),
     );
   }
@@ -297,9 +291,8 @@ async function handleEvent(
   r2?: R2Bucket,
   proxyDispatch?: HarnessProxyDispatch,
   legacyReplyOwner = false,
-  answerArchiveLocally = false,
-  attemptBookingLocally = false,
-  bookingReplied: { done: boolean } = { done: false },
+  legacyFallback: { needed: boolean } = { needed: false },
+  mirrorOnly = false,
 ): Promise<void> {
   if (event.type === 'follow') {
     const userId =
@@ -342,6 +335,17 @@ async function handleEvent(
       } catch (err) {
         console.error('[wahms-participant] failed', err);
       }
+
+      // 友だち追加のあいさつ (今週の6校カレンダー)。これも Apps Script から
+      // 引き取る。返せたときは転送しないので、2通届くことはない。
+      try {
+        if (!event.replyToken) throw new Error('no reply token');
+        await lineClient.replyMessage(event.replyToken, await welcomeMessages(db, lineAccountId));
+        console.log(`[wahms] welcome sent ${userId}`);
+      } catch (err) {
+        console.error('[wahms] welcome failed', err);
+        legacyFallback.needed = true;
+      }
     }
 
     // 新規・再フォローのどちらでも、最初の友だち登録マイルを同じキーで非同期投入する。
@@ -356,6 +360,14 @@ async function handleEvent(
       metadata: { lineAccountId },
       occurredAt: firstFollowedAt,
     });
+
+    // 既存ツールが応答を担当しているアカウントは、ここで終わり。
+    // 友だちの記録は済ませたので管理画面には出るが、あいさつもシナリオ配信も
+    // こちらからは出さない。二重に届いてしまうため。
+    if (mirrorOnly) {
+      console.log(`[mirror] follow recorded ${userId}`);
+      return;
+    }
 
     // Resolve referral link (entry_route) for this friend.
     // /auth/callback (OAuth path) writes friends.ref_code in parallel with
@@ -503,6 +515,9 @@ async function handleEvent(
       console.error('Failed to log incoming postback', err);
     }
 
+    // 既存ツールが応答を担当しているアカウントは、記録だけで終わり。
+    if (mirrorOnly) return;
+
     // postback data を auto_replies にマッチさせて返信 (テキスト経路と共通)。
     // silent + automation で「返信なしでタグだけ付ける」構成もここで成立する。
     const { matched: postbackMatched, replyTokenConsumed: postbackReplyTokenConsumed } =
@@ -648,82 +663,47 @@ async function handleEvent(
       occurredAt: now,
     });
 
-    // WAHMS is intentionally operated by its existing Apps Script. Both the
-    // Worker and GAS receive the same signed event, but only GAS may consume
-    // the one-time LINE replyToken. The Worker still stores the incoming
-    // message and updates the inbox, while skipping CRM reply automations that
-    // would race the established rich-menu / booking responses.
+    // 既存ツールが応答を担当しているアカウントは、記録だけで終わり。
+    // replyToken は一度しか使えないので、こちらが触ると相手の返信が失敗する。
+    if (mirrorOnly) {
+      await upsertChatOnMessage(db, friend.id);
+      return;
+    }
+
+    // WAHMS の応答は Worker が返す。同じイベントは Apps Script にも流せるが、
+    // 一度きりの replyToken を使えるのは片方だけなので、返せたときは転送しない
+    // (呼び出し元が legacyFallback を見て判断する)。
     if (legacyReplyOwner) {
       await upsertChatOnMessage(db, friend.id);
 
-      // 申込。確実に扱えるときだけ Worker が記録して返信する。返信できな
-      // かった場合は呼び出し元が Apps Script へ転送するので、利用者から見て
-      // 「申し込んだのに反応が無い」にはならない。
-      const booking = parseBookingRequest(incomingText);
-      const bookingUserId = event.source.userId;
-      if (booking && lineAccountId && bookingUserId && event.replyToken) {
-        try {
-          // 初参加の人は Apps Script が初回アンケートへ案内する。その導線を
-          // Worker はまだ持っていないので引き取らない。
-          const slot = await findLectureSlot(db, lineAccountId, booking);
-
-          // 返信を Apps Script に任せる場合でも、記録だけは必ずこちらで持つ。
-          // 以前は引き取れたときだけ記録しており、当日はじめて友だち追加した
-          // 人の申込が管理画面に出なかった (2026-08-26 のWEB学校で3件)。
-          // 記録と返信は別の話なので、条件を分ける。
-          if (slot) {
-            await recordBooking(db, lineAccountId, bookingUserId, slot);
-          } else {
-            console.warn(`[wahms-booking] slot not found: ${incomingText}`);
-          }
-
-          // 初参加の人は Apps Script が初回アンケートへ案内する。その導線を
-          // Worker はまだ持っていないので、返信は引き取らない。
-          const repeat = await db
-            .prepare(
-              `SELECT 1 AS ok FROM wahms_participants
-                WHERE line_account_id = ? AND line_user_id = ?
-                  AND survey_completed_at IS NOT NULL AND survey_completed_at <> ''`,
-            )
-            .bind(lineAccountId, bookingUserId)
-            .first<{ ok: number }>();
-          const zoom = repeat && slot ? await loadZoomSettings(db, lineAccountId) : null;
-          if (attemptBookingLocally && repeat && slot && zoom) {
-            await lineClient.replyMessage(
-              event.replyToken,
-              bookingConfirmMessages(slot, zoom).map((text) => ({ type: 'text' as const, text })),
-            );
-            bookingReplied.done = true;
-            console.log(`[wahms-booking] replied ${slot.schoolName} ${slot.eventDate}`);
-          } else {
-            console.log(
-              `[wahms-booking] recorded, reply deferred to legacy (repeat=${Boolean(repeat)} slot=${Boolean(slot)} zoom=${Boolean(zoom)})`,
-            );
-          }
-        } catch (err) {
-          // ここで落ちても bookingReplied.done は false のままなので転送される。
-          console.error('[wahms-booking] takeover failed', err);
-        }
+      if (!lineAccountId) {
+        legacyFallback.needed = true;
+        return;
       }
-
-      // アーカイブ要求だけは Worker が D1 から返す。この webhook は Apps Script
-      // へ転送していないので、replyToken を使うのはここだけになる。
-      const school = answerArchiveLocally ? parseArchiveRequest(incomingText) : null;
-      if (school && lineAccountId && event.replyToken) {
-        try {
-          const text = await buildArchiveReply(db, lineAccountId, school);
-          if (text) {
-            await lineClient.replyMessage(event.replyToken, [{ type: 'text', text }]);
+      try {
+        const outcome = await buildWahmsReply({
+          db,
+          lineAccountId,
+          lineUserId: event.source.userId ?? null,
+          text: incomingText,
+        });
+        if (outcome.kind === 'handled') {
+          if (!event.replyToken) {
+            legacyFallback.needed = true;
           } else {
-            // 該当学校が D1 に無い。黙って落とさず、その旨を返す。
-            console.warn(`[wahms-archive] unknown school: ${school}`);
-            await lineClient.replyMessage(event.replyToken, [
-              { type: 'text', text: 'アーカイブが見つかりませんでした。メニューからもう一度お試しください。' },
-            ]);
+            await lineClient.replyMessage(event.replyToken, outcome.messages);
+            console.log(`[wahms] replied: ${incomingText}`);
           }
-        } catch (err) {
-          console.error('[wahms-archive] reply failed', err);
+        } else if (outcome.kind === 'fallback') {
+          console.warn(`[wahms] cannot answer (${outcome.reason}): ${incomingText}`);
+          legacyFallback.needed = true;
         }
+        // kind === 'skip' は WAHMS の文言ではないので、どちらも何もしない。
+      } catch (err) {
+        // 返せなかったので Apps Script に任せる。利用者から見て
+        // 「押したのに反応が無い」にはならない。
+        console.error('[wahms] reply failed', err);
+        legacyFallback.needed = true;
       }
       return;
     }

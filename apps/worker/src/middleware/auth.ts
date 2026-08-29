@@ -297,6 +297,8 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
       path !== '/webhook' &&
       !path.startsWith('/wahms/survey') &&
       !path.startsWith('/survey') &&
+      !path.startsWith('/wahms/profile') &&
+      !path.startsWith('/profile') &&
       !path.startsWith('/auth/') &&
       path !== '/setup' &&
       !path.startsWith('/t/') &&
@@ -365,6 +367,11 @@ export async function authMiddleware(c: Context<Env>, next: Next): Promise<Respo
     // Zoomのチャットなどでリンクとして認識されないため)。
     /^\/(?:wahms\/)?survey(?:\/[A-Za-z0-9_-]+)?$/.test(path) ||
     (path === '/api/public/wahms-survey' && method === 'POST') ||
+    // 初参加者のプロフィール登録。LIFF (LINEログイン必須) をやめて普通のWeb
+    // ページにしたので、ここも認証なしで開ける必要がある。誰の回答かは
+    // URLの使い捨てトークンで確定する。
+    /^\/(?:wahms\/)?profile(?:\/thanks)?$/.test(path) ||
+    (path === '/api/public/wahms-profile' && method === 'POST') ||
     path === '/api/qr' || // Public QR proxy — used by desktop landing pages
     path === '/api/health' || // Liveness probe (update CLI / self-update verify)
     // Public lead form. Origin validation and field validation happen in-route.
