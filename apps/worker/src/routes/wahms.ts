@@ -1,6 +1,10 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { Env } from '../index.js';
+import {
+  findSlotById, lectureApplicantIds, resumeLecture, shiftLectureWeek, suspendLecture,
+} from '../services/wahms-lecture-ops.js';
+import { lecturePostponedMessage, japaneseDate } from '../services/wahms-messages.js';
 
 const wahms = new Hono<Env>();
 
@@ -156,16 +160,20 @@ wahms.get('/api/wahms/overview', async (c) => {
     c.env.DB.prepare(`SELECT * FROM wahms_delivery_logs WHERE line_account_id = ? ORDER BY created_at DESC LIMIT 30`).bind(accountId).all(),
     // 開催予定。申込が1件も無い日でも、何時に何をやるのかを画面に出すため。
     // starts_at はUTCなので、+9時間してJSTの日付と時刻に直して返す。
+    // 受付を止めた回 (延期・休講) も返す。画面から再開できないと、
+    // 止めたあと私に頼まないと戻せなくなる。
     c.env.DB.prepare(
-      `SELECT e.name AS school_name,
+      `SELECT s.id AS slot_id,
+              e.name AS school_name,
               DATE(s.starts_at, '+9 hours') AS event_date,
               TIME(s.starts_at, '+9 hours') AS start_time,
               TIME(s.ends_at, '+9 hours') AS end_time,
               s.sequence_label AS lecture_label,
-              s.title AS theme
+              s.title AS theme,
+              s.is_active AS is_active
          FROM event_slots s
          JOIN events e ON e.id = s.event_id
-        WHERE e.line_account_id = ? AND s.deleted_at IS NULL AND s.is_active = 1
+        WHERE e.line_account_id = ? AND s.deleted_at IS NULL
         ORDER BY s.starts_at`,
     ).bind(accountId).all(),
   ]);
@@ -367,6 +375,103 @@ wahms.delete('/api/wahms/archives/:id', async (c) => {
   if ('error' in scope) return scope.error;
   await c.env.DB.prepare('DELETE FROM wahms_archives WHERE id = ? AND line_account_id = ?').bind(c.req.param('id'), scope.account.id).run();
   return c.json({ success: true, data: null });
+});
+
+// ─── 開催予定の操作 ───────────────────────────────────────────────
+// 延期・休講・繰越。2026年8月に2週続けて起き、そのたびに手作業でDBを
+// 直していた。手順を間違えると、延期したのに Zoom 案内が飛ぶ。
+
+/** 操作の結果を、画面にそのまま出せる日本語にする。 */
+function lectureLabelOf(slot: { schoolName: string; eventDate: string; lectureLabel: string | null }): string {
+  return `${slot.schoolName} ${slot.lectureLabel ?? ''}（${japaneseDate(slot.eventDate)}）`.replace('  ', ' ');
+}
+
+wahms.post('/api/wahms/lectures/:slotId/suspend', async (c) => {
+  const scope = await requireWahmsAccount(c);
+  if ('error' in scope) return scope.error;
+  const result = await suspendLecture(c.env.DB, scope.account.id, c.req.param('slotId'));
+  if (!result) return c.json({ success: false, error: 'この開催予定が見つかりません' }, 404);
+  return c.json({
+    success: true,
+    data: {
+      lecture: lectureLabelOf(result.slot),
+      applicants: result.applicants,
+      remindersStopped: result.remindersStopped,
+    },
+  });
+});
+
+wahms.post('/api/wahms/lectures/:slotId/resume', async (c) => {
+  const scope = await requireWahmsAccount(c);
+  if ('error' in scope) return scope.error;
+  const result = await resumeLecture(c.env.DB, scope.account.id, c.req.param('slotId'));
+  if (!result) return c.json({ success: false, error: 'この開催予定が見つかりません' }, 404);
+  return c.json({
+    success: true,
+    data: { lecture: lectureLabelOf(result.slot), remindersRearmed: result.remindersRearmed },
+  });
+});
+
+wahms.post('/api/wahms/lectures/:slotId/shift-week', async (c) => {
+  const scope = await requireWahmsAccount(c);
+  if ('error' in scope) return scope.error;
+  const result = await shiftLectureWeek(c.env.DB, scope.account.id, c.req.param('slotId'));
+  if (!result) return c.json({ success: false, error: 'この開催予定が見つかりません' }, 404);
+  return c.json({
+    success: true,
+    data: {
+      lecture: lectureLabelOf(result.slot),
+      newDate: result.newDate,
+      shiftedSlots: result.shiftedSlots,
+      movedApplications: result.movedApplications,
+    },
+  });
+});
+
+/**
+ * 延期のお知らせを、その回の申込者へ送る。
+ *
+ * 一斉配信と同じ扱いにして、確認なしでは飛ばない。申込者はすでに開催日の
+ * 朝に Zoom 案内を受け取っていることが多く、知らせないと当日 Zoom に来る。
+ */
+wahms.post('/api/wahms/lectures/:slotId/notify-postponed', async (c) => {
+  const scope = await requireWahmsAccount(c);
+  if ('error' in scope) return scope.error;
+  const body = await c.req.json<{ testRecipientId?: string; confirmBroadcast?: boolean }>().catch(() => ({}));
+  const scopeMode = resolveDeliveryScope(body);
+  if (scopeMode.mode === 'invalid') return c.json({ success: false, error: scopeMode.message }, 400);
+
+  const slot = await findSlotById(c.env.DB, scope.account.id, c.req.param('slotId'));
+  if (!slot) return c.json({ success: false, error: 'この開催予定が見つかりません' }, 404);
+
+  const ids = scopeMode.mode === 'test'
+    ? [scopeMode.recipientId]
+    : await lectureApplicantIds(c.env.DB, scope.account.id, slot);
+  if (!ids.length) return c.json({ success: false, error: 'この講義の申込者が見つかりません' }, 400);
+
+  const text = lecturePostponedMessage(
+    slot.schoolName,
+    japaneseDate(slot.eventDate),
+    `${slot.startTime}〜${slot.endTime}`,
+  );
+
+  let success = 0;
+  let failure = 0;
+  for (const lineUserId of ids) {
+    const response = await proxySend(c, scope.account.id, 'push', {
+      to: lineUserId, messages: [{ type: 'text', text }],
+    }, true);
+    if (response.ok) success += 1; else failure += 1;
+  }
+  await c.env.DB.prepare(
+    `INSERT INTO wahms_delivery_logs (id, line_account_id, delivery_type, title, target_count, success_count, failure_count, created_by)
+     VALUES (?, ?, 'flex', ?, ?, ?, ?, ?)`,
+  ).bind(
+    crypto.randomUUID(), scope.account.id, `延期のお知らせ ${lectureLabelOf(slot)}`,
+    ids.length, success, failure, c.get('staff')?.name || '担当者',
+  ).run();
+
+  return c.json({ success: failure === 0, data: { targetCount: ids.length, success, failure, text } });
 });
 
 export { wahms };

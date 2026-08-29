@@ -26,9 +26,18 @@ describe('開催予定の取得', () => {
     expect(s).toContain("TIME(s.starts_at, '+9 hours')");
   });
 
-  test('削除・停止した枠は出さない', async () => {
+  test('削除した枠は出さない', async () => {
     const s = await source();
-    expect(s).toContain('s.deleted_at IS NULL AND s.is_active = 1');
+    expect(s).toContain('s.deleted_at IS NULL');
+  });
+
+  test('受付を止めた枠も返す（画面から再開できなくなるため）', async () => {
+    // 受講者に見せる「今週の開催日」は is_active = 1 だけを拾う
+    // (services/wahms-schedule.ts)。管理画面はそれとは別で、止めた回も
+    // 一覧に出して再開できる必要がある。
+    const s = await source();
+    expect(s).toContain('s.is_active AS is_active');
+    expect(s).toContain('s.id AS slot_id');
   });
 
   test('他アカウントの予定を混ぜない', async () => {

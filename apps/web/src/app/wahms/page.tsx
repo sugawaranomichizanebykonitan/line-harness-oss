@@ -11,10 +11,10 @@ function todayJst(): string {
   return new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10)
 }
 
-type Tab = 'participants' | 'surveys' | 'archives' | 'delivery'
+type Tab = 'participants' | 'schedule' | 'surveys' | 'archives' | 'delivery'
 
 const tabLabels: Record<Tab, string> = {
-  participants: '参加者管理', surveys: '講義アンケート', archives: 'アーカイブ', delivery: '配信',
+  participants: '参加者管理', schedule: '開催予定', surveys: '講義アンケート', archives: 'アーカイブ', delivery: '配信',
 }
 
 function dateLabel(value?: string): string {
@@ -238,10 +238,122 @@ export default function WahmsPage() {
         <div className="space-y-3">{data.surveys.map((s) => <article key={s.id} className="rounded-xl border bg-white p-4"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">{s.school_name}</span><span className="text-xs text-gray-500">{dateLabel(s.responded_at)}</span>{isWebResponse(s) && <span className="rounded-full bg-blue-100 px-2 py-1 text-xs font-bold text-blue-700">Web回答</span>}{s.response_status === 'pending' && !isReplySkipped(s) && <span className="rounded-full bg-red-100 px-2 py-1 text-xs font-bold text-red-700">要対応</span>}{s.response_status === 'completed' && <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-bold text-gray-600">対応完了</span>}{isReplySkipped(s) && <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-bold text-gray-600">返信不要</span>}</div><div className="mt-3 grid gap-3 text-sm md:grid-cols-4"><div><span className="text-gray-500">回答者</span><p className="font-medium">{s.respondent_name || '名前未登録'}</p></div><div><span className="text-gray-500">満足度</span><p className="font-medium">{s.satisfaction ? `${s.satisfaction} / 5` : '—'}</p></div><div><span className="text-gray-500">価値評価</span><p className="font-medium">{s.value_rating || '—'}</p></div><div><span className="text-gray-500">次回参加意向</span><p className="font-medium">{s.next_intent || '—'}</p></div></div>{s.question && <div className="mt-4 rounded-lg bg-amber-50 p-3"><p className="text-xs font-bold text-amber-700">青山さんへの質問</p><p className="mt-1 text-sm text-gray-800">{s.question}</p>{s.response_status === 'completed' ? <div className="mt-3 border-t border-amber-200 pt-3"><p className="text-xs font-bold text-gray-500">返信済み</p><p className="mt-1 text-sm">{s.answer}</p></div> : isReplySkipped(s) ? <div className="mt-3 border-t border-amber-200 pt-3 text-sm text-gray-600">返信対応しないことにした質問です。集計には含まれています。</div> : isWebResponse(s) ? <div className="mt-3 border-t border-amber-200 pt-3"><p className="text-sm text-gray-600">この方は公式LINE未登録のため、ここからは返信できません。別の手段でご連絡ください。</p><SkipReplyButton surveyId={s.id} onSkip={skipReply} /></div> : <div className="mt-3 flex flex-col gap-2 md:flex-row"><textarea value={answers[s.id] || ''} onChange={(e) => setAnswers({ ...answers, [s.id]: e.target.value })} placeholder="ここに返信を入力" className="min-h-24 flex-1 rounded-lg border border-amber-300 bg-white p-3 text-sm" /><div className="flex flex-col gap-2"><button onClick={async () => { if (!selectedAccountId) return; try { await wahmsApi.reply(selectedAccountId, s.id, answers[s.id] || ''); flash('LINEへ返信し、対応完了にしました'); await refresh() } catch { setError('返信できませんでした。内容を確認してください。') } }} className="rounded-lg bg-green-600 px-5 py-3 font-bold text-white">LINEへ返信</button><SkipReplyButton surveyId={s.id} onSkip={skipReply} /></div></div>}</div>}</article>)}</div>
       </section>}
 
+      {tab === 'schedule' && data && <ScheduleTab data={data} accountId={selectedAccountId!} refresh={refresh} flash={flash} setError={setError} />}
       {tab === 'archives' && data && <ArchiveTab data={data} accountId={selectedAccountId!} refresh={refresh} flash={flash} setError={setError} />}
       {tab === 'delivery' && data && <DeliveryTab data={data} accountId={selectedAccountId!} eventOptions={eventOptions} refresh={refresh} flash={flash} setError={setError} />}
     </main>
   </>
+}
+
+/**
+ * 開催予定の操作。延期・休講・繰越を、ここだけで完結させる。
+ *
+ * 2026年8月に2週続けて延期が起き、そのたびに手作業でDBを直していた。
+ * 危ないのは「受付を止めたのにリマインドが飛ぶ」で、実際に2回とも
+ * 起きかけた。受付を止めるボタンが、その日のリマインドも一緒に止める。
+ */
+function ScheduleTab({ data, accountId, refresh, flash, setError }: { data: WahmsOverview; accountId: string; refresh: () => Promise<void>; flash: (s: string) => void; setError: (s: string) => void }) {
+  const today = todayJst()
+  const [busy, setBusy] = useState('')
+  const [confirming, setConfirming] = useState<{ slotId: string; kind: 'shift' | 'notify' } | null>(null)
+
+  // 今日以降だけを出す。過ぎた回を操作しても意味がなく、押し間違いの元になる。
+  const upcoming = useMemo(
+    () => (data.lectures || []).filter((l) => l.event_date >= today).slice(0, 40),
+    [data.lectures, today],
+  )
+
+  const run = async (slotId: string, label: string, fn: () => Promise<string>) => {
+    setBusy(slotId + label)
+    try { flash(await fn()); await refresh() }
+    catch { setError('変更できませんでした。時間をおいて試してください。') }
+    finally { setBusy(''); setConfirming(null) }
+  }
+
+  /** 失敗はそのまま投げて、呼び出し元のエラー表示に任せる。 */
+  const ok = <T,>(r: { success: boolean; data?: T }): T => {
+    if (!r.success || !r.data) throw new Error('failed')
+    return r.data
+  }
+
+  const suspend = (slotId: string) => run(slotId, 'suspend', async () => {
+    const d = ok(await wahmsApi.suspendLecture(accountId, slotId))
+    return `${d.lecture} の受付を止めました。申込ボタンが消え、この日のリマインドも止まります（申込 ${d.applicants}名 / 止めた案内 ${d.remindersStopped}件）`
+  })
+
+  const resume = (slotId: string) => run(slotId, 'resume', async () => {
+    const d = ok(await wahmsApi.resumeLecture(accountId, slotId))
+    return `${d.lecture} の受付を再開しました`
+  })
+
+  const shift = (slotId: string) => run(slotId, 'shift', async () => {
+    const d = ok(await wahmsApi.shiftLectureWeek(accountId, slotId))
+    return `${d.lecture} を ${d.newDate} へ。以降の回も1週ずつ後ろにずらしました（枠 ${d.shiftedSlots}件 / 申込 ${d.movedApplications}件を移動）`
+  })
+
+  const notify = (slotId: string) => run(slotId, 'notify', async () => {
+    const d = ok(await wahmsApi.notifyPostponed(accountId, slotId))
+    return `延期のお知らせを ${d.success}名へ送りました${d.failure ? `（失敗 ${d.failure}名）` : ''}`
+  })
+
+  const applicantsOn = (l: WahmsOverview['lectures'][number]) =>
+    data.applications.filter((a) => a.school_name === l.school_name && eventDay(a.event_date) === l.event_date).length
+
+  return <section>
+    <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+      <p className="font-bold">延期・休講になったら「受付を止める」を押してください。</p>
+      <p className="mt-1">申込ボタンが消え、その日のZoom案内（朝と開始30分前）も一緒に止まります。すでに申し込んでいる方には、右の「延期を知らせる」でご案内できます。</p>
+    </div>
+
+    <div className="overflow-hidden rounded-xl border bg-white">
+      <div className="border-b bg-gray-50 px-4 py-3 font-bold">今後の開催予定</div>
+      {upcoming.length === 0 && <div className="p-8 text-center text-gray-500">今後の開催予定がありません。</div>}
+      <ul className="divide-y">
+        {upcoming.map((l) => {
+          const stopped = !l.is_active
+          const count = applicantsOn(l)
+          const isToday = l.event_date === today
+          return <li key={l.slot_id} className={`p-4 ${stopped ? 'bg-gray-50' : isToday ? 'bg-green-50' : ''}`}>
+            <div className="flex flex-col gap-3 md:flex-row md:items-center">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-bold text-gray-900">{l.school_name}</span>
+                  {l.lecture_label && <span className="rounded bg-gray-100 px-2 py-0.5 text-xs font-bold text-gray-600">{l.lecture_label}</span>}
+                  {isToday && <span className="rounded bg-green-600 px-2 py-0.5 text-xs font-bold text-white">本日</span>}
+                  {stopped && <span className="rounded bg-gray-600 px-2 py-0.5 text-xs font-bold text-white">受付停止（延期・休講）</span>}
+                </div>
+                <p className="mt-1 text-sm text-gray-600">{dateLabel(l.event_date)}　{hhmm(l.start_time)}〜{hhmm(l.end_time)}　申込 {count}名</p>
+                <p className="mt-0.5 truncate text-sm text-gray-500">{l.theme || 'テーマ未登録'}</p>
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                {stopped
+                  ? <button disabled={!!busy} onClick={() => void resume(l.slot_id)} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">受付を再開する</button>
+                  : <button disabled={!!busy} onClick={() => void suspend(l.slot_id)} className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">受付を止める</button>}
+                <button disabled={!!busy} onClick={() => setConfirming({ slotId: l.slot_id, kind: 'shift' })} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-bold text-gray-700 disabled:opacity-50">1週間ずらす</button>
+                {count > 0 && <button disabled={!!busy} onClick={() => setConfirming({ slotId: l.slot_id, kind: 'notify' })} className="rounded-lg border border-amber-400 px-4 py-2 text-sm font-bold text-amber-700 disabled:opacity-50">延期を知らせる</button>}
+              </div>
+            </div>
+
+            {confirming?.slotId === l.slot_id && confirming.kind === 'shift' && <div className="mt-3 rounded-lg border border-gray-300 bg-white p-3">
+              <p className="text-sm text-gray-700"><b>{l.school_name} {l.lecture_label}</b> を1週間後ろへずらします。<br /><b>以降の回もすべて1週ずつ後ろにずれます。</b>申込者{count}名の開催日も一緒に移ります。よろしいですか？</p>
+              <div className="mt-2 flex gap-2">
+                <button onClick={() => void shift(l.slot_id)} className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-bold text-white">ずらす</button>
+                <button onClick={() => setConfirming(null)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-bold text-gray-600">やめる</button>
+              </div>
+            </div>}
+
+            {confirming?.slotId === l.slot_id && confirming.kind === 'notify' && <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+              <p className="text-sm text-amber-900"><b>申込者{count}名全員のLINEへ</b>、この回が延期になった旨をお送りします。取り消せません。よろしいですか？</p>
+              <div className="mt-2 flex gap-2">
+                <button onClick={() => void notify(l.slot_id)} className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-bold text-white">{count}名へ送る</button>
+                <button onClick={() => setConfirming(null)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-bold text-gray-600">やめる</button>
+              </div>
+            </div>}
+          </li>
+        })}
+      </ul>
+    </div>
+  </section>
 }
 
 /**
