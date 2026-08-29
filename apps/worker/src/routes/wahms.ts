@@ -415,8 +415,11 @@ wahms.post('/api/wahms/lectures/:slotId/resume', async (c) => {
 wahms.post('/api/wahms/lectures/:slotId/shift-week', async (c) => {
   const scope = await requireWahmsAccount(c);
   if ('error' in scope) return scope.error;
-  const result = await shiftLectureWeek(c.env.DB, scope.account.id, c.req.param('slotId'));
+  // direction=back は押し間違いを1週間ぶん戻すためのもの。
+  const direction = c.req.query('direction') === 'back' ? 'back' : 'forward';
+  const result = await shiftLectureWeek(c.env.DB, scope.account.id, c.req.param('slotId'), direction);
   if (!result) return c.json({ success: false, error: 'この開催予定が見つかりません' }, 404);
+  if ('refused' in result) return c.json({ success: false, error: result.refused }, 400);
   return c.json({
     success: true,
     data: {
@@ -424,6 +427,7 @@ wahms.post('/api/wahms/lectures/:slotId/shift-week', async (c) => {
       newDate: result.newDate,
       shiftedSlots: result.shiftedSlots,
       movedApplications: result.movedApplications,
+      direction,
     },
   });
 });

@@ -255,7 +255,7 @@ export default function WahmsPage() {
 function ScheduleTab({ data, accountId, refresh, flash, setError }: { data: WahmsOverview; accountId: string; refresh: () => Promise<void>; flash: (s: string) => void; setError: (s: string) => void }) {
   const today = todayJst()
   const [busy, setBusy] = useState('')
-  const [confirming, setConfirming] = useState<{ slotId: string; kind: 'shift' | 'notify' } | null>(null)
+  const [confirming, setConfirming] = useState<{ slotId: string; kind: 'shift' | 'shiftBack' | 'notify' } | null>(null)
 
   // 今日以降だけを出す。過ぎた回を操作しても意味がなく、押し間違いの元になる。
   const upcoming = useMemo(
@@ -286,9 +286,10 @@ function ScheduleTab({ data, accountId, refresh, flash, setError }: { data: Wahm
     return `${d.lecture} の受付を再開しました`
   })
 
-  const shift = (slotId: string) => run(slotId, 'shift', async () => {
-    const d = ok(await wahmsApi.shiftLectureWeek(accountId, slotId))
-    return `${d.lecture} を ${d.newDate} へ。以降の回も1週ずつ後ろにずらしました（枠 ${d.shiftedSlots}件 / 申込 ${d.movedApplications}件を移動）`
+  const shift = (slotId: string, direction: 'forward' | 'back') => run(slotId, 'shift', async () => {
+    const d = ok(await wahmsApi.shiftLectureWeek(accountId, slotId, direction))
+    const way = direction === 'back' ? '前' : '後ろ'
+    return `${d.lecture} を ${d.newDate} へ。以降の回も1週ずつ${way}にずらしました（枠 ${d.shiftedSlots}件 / 申込 ${d.movedApplications}件を移動）`
   })
 
   const notify = (slotId: string) => run(slotId, 'notify', async () => {
@@ -303,6 +304,7 @@ function ScheduleTab({ data, accountId, refresh, flash, setError }: { data: Wahm
     <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
       <p className="font-bold">延期・休講になったら「受付を止める」を押してください。</p>
       <p className="mt-1">申込ボタンが消え、その日のZoom案内（朝と開始30分前）も一緒に止まります。すでに申し込んでいる方には、右の「延期を知らせる」でご案内できます。</p>
+      <p className="mt-2 text-xs">押し間違えても、<b>「受付を止める／再開する」と「1週間ずらす／戻す」は元に戻せます。</b>戻せないのは<b>「延期を知らせる」だけ</b>です（LINEは送信を取り消せないため、確認画面を挟んでいます）。</p>
     </div>
 
     <div className="overflow-hidden rounded-xl border bg-white">
@@ -330,6 +332,7 @@ function ScheduleTab({ data, accountId, refresh, flash, setError }: { data: Wahm
                   ? <button disabled={!!busy} onClick={() => void resume(l.slot_id)} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">受付を再開する</button>
                   : <button disabled={!!busy} onClick={() => void suspend(l.slot_id)} className="rounded-lg bg-gray-700 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">受付を止める</button>}
                 <button disabled={!!busy} onClick={() => setConfirming({ slotId: l.slot_id, kind: 'shift' })} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-bold text-gray-700 disabled:opacity-50">1週間ずらす</button>
+                <button disabled={!!busy} onClick={() => setConfirming({ slotId: l.slot_id, kind: 'shiftBack' })} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-bold text-gray-500 disabled:opacity-50" title="「1週間ずらす」を押し間違えたときに戻します">1週間戻す</button>
                 {count > 0 && <button disabled={!!busy} onClick={() => setConfirming({ slotId: l.slot_id, kind: 'notify' })} className="rounded-lg border border-amber-400 px-4 py-2 text-sm font-bold text-amber-700 disabled:opacity-50">延期を知らせる</button>}
               </div>
             </div>
@@ -337,7 +340,16 @@ function ScheduleTab({ data, accountId, refresh, flash, setError }: { data: Wahm
             {confirming?.slotId === l.slot_id && confirming.kind === 'shift' && <div className="mt-3 rounded-lg border border-gray-300 bg-white p-3">
               <p className="text-sm text-gray-700"><b>{l.school_name} {l.lecture_label}</b> を1週間後ろへずらします。<br /><b>以降の回もすべて1週ずつ後ろにずれます。</b>申込者{count}名の開催日も一緒に移ります。よろしいですか？</p>
               <div className="mt-2 flex gap-2">
-                <button onClick={() => void shift(l.slot_id)} className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-bold text-white">ずらす</button>
+                <button onClick={() => void shift(l.slot_id, 'forward')} className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-bold text-white">ずらす</button>
+                <button onClick={() => setConfirming(null)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-bold text-gray-600">やめる</button>
+              </div>
+              <p className="mt-2 text-xs text-gray-500">押し間違えても「1週間戻す」で元に戻せます。</p>
+            </div>}
+
+            {confirming?.slotId === l.slot_id && confirming.kind === 'shiftBack' && <div className="mt-3 rounded-lg border border-gray-300 bg-white p-3">
+              <p className="text-sm text-gray-700"><b>{l.school_name} {l.lecture_label}</b> を1週間<b>前</b>へ戻します。<br />「1週間ずらす」を押し間違えたときに使ってください。<b>以降の回もすべて1週ずつ前に戻ります。</b></p>
+              <div className="mt-2 flex gap-2">
+                <button onClick={() => void shift(l.slot_id, 'back')} className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-bold text-white">戻す</button>
                 <button onClick={() => setConfirming(null)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-bold text-gray-600">やめる</button>
               </div>
             </div>}

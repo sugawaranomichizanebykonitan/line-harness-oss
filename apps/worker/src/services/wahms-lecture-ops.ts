@@ -76,12 +76,18 @@ export async function suspendLecture(
     .bind(slotId)
     .run();
 
-  // リマインドは「送信済み」にして止める。行を消さないのは、あとで
-  // 再開したときに誰が対象だったか分からなくなるため。
+  // リマインドを止める。値は 1 ではなく 2 を入れる。
+  //
+  // 送信処理は「0 でなければ送らない」ので、止める効果は 1 と同じ。
+  // 違うのは戻すとき。1 は「実際に送った」印なので、再開で 0 に戻すと
+  // 送り直しになる。2 は「押し間違いを含め、こちらが止めただけ」の印で、
+  // 再開すると 0 に戻る。これで当日に押し間違えても元に戻せる。
   const stopped = await db
     .prepare(
       `UPDATE wahms_applications
-          SET morning_reminder_sent = 1, last_reminder_sent = 1, updated_at = datetime('now')
+          SET morning_reminder_sent = CASE WHEN morning_reminder_sent = 0 THEN 2 ELSE morning_reminder_sent END,
+              last_reminder_sent    = CASE WHEN last_reminder_sent = 0 THEN 2 ELSE last_reminder_sent END,
+              updated_at = datetime('now')
         WHERE line_account_id = ? AND school_name = ? AND ${SAME_DAY}
           AND source_row IS NULL`,
     )
@@ -93,10 +99,11 @@ export async function suspendLecture(
 }
 
 /**
- * 受付を再開する。
+ * 受付を再開する。押し間違いをそのまま戻せる。
  *
- * リマインドの送信済みフラグは、**開催日が明日以降のときだけ**戻す。
- * 当日に戻すと、朝に送ったぶんがもう一度飛ぶ。
+ * 戻すのは「こちらが止めた印 (2)」が付いているものだけ。実際に送った印 (1)
+ * には触らないので、当日に押し間違えて戻しても、朝に送ったぶんが
+ * もう一度飛ぶことはない。
  */
 export async function resumeLecture(
   db: D1Database,
@@ -114,46 +121,62 @@ export async function resumeLecture(
   const rearmed = await db
     .prepare(
       `UPDATE wahms_applications
-          SET morning_reminder_sent = 0, last_reminder_sent = 0, updated_at = datetime('now')
+          SET morning_reminder_sent = CASE WHEN morning_reminder_sent = 2 THEN 0 ELSE morning_reminder_sent END,
+              last_reminder_sent    = CASE WHEN last_reminder_sent = 2 THEN 0 ELSE last_reminder_sent END,
+              updated_at = datetime('now')
         WHERE line_account_id = ? AND school_name = ? AND ${SAME_DAY}
           AND source_row IS NULL
-          AND ? > DATE('now', '+9 hours')`,
+          AND (morning_reminder_sent = 2 OR last_reminder_sent = 2)`,
     )
-    .bind(lineAccountId, slot.schoolName, slot.eventDate, slot.eventDate)
+    .bind(lineAccountId, slot.schoolName, slot.eventDate)
     .run();
 
   return { slot, remindersRearmed: rearmed.meta?.changes ?? 0 };
 }
 
+export type ShiftDirection = 'forward' | 'back';
 export type ShiftResult = {
   slot: LectureSlotRow;
   shiftedSlots: number;
   movedApplications: number;
   newDate: string;
 };
+export type ShiftRefusal = { refused: string };
 
 /**
- * この回以降を1週間ずつ後ろへずらす (繰越)。
+ * この回以降を1週間ずつ動かす (繰越 / その取り消し)。
  *
  * 運用ルール (docs/WAHMS_GAS_MIGRATION.md) どおり、該当回だけを動かすのでは
  * なく以降を全部ずらす。1回だけ動かすと次の回と同じ日に重なる。
  *
- * 申込者の開催日も一緒に動かす。動かさないと、延期後の回に誰も申し込んで
+ * 申込者の開催日も一緒に動かす。動かさないと、動かした先の回に誰も申し込んで
  * いないことになり、リマインドも届かない。
+ *
+ * `back` は押し間違いを戻すためのもの。過去に送り込むと、そこへ移した申込が
+ * 二度と案内されなくなるので断る。
  */
 export async function shiftLectureWeek(
   db: D1Database,
   lineAccountId: string,
   slotId: string,
-): Promise<ShiftResult | null> {
+  direction: ShiftDirection = 'forward',
+  today = new Date(),
+): Promise<ShiftResult | ShiftRefusal | null> {
   const slot = await findSlotById(db, lineAccountId, slotId);
   if (!slot) return null;
+
+  const days = direction === 'back' ? -7 : 7;
+  const newDate = addDays(slot.eventDate, days);
+  const todayJst = new Date(today.getTime() + 9 * 3600_000).toISOString().slice(0, 10);
+  if (newDate < todayJst) {
+    return { refused: `${newDate} は過ぎた日付です。過去には動かせません` };
+  }
 
   const shifted = await db
     .prepare(
       `UPDATE event_slots
-          SET starts_at  = strftime('%Y-%m-%dT%H:%M:%SZ', starts_at, '+7 days'),
-              ends_at    = strftime('%Y-%m-%dT%H:%M:%SZ', ends_at,   '+7 days'),
+          SET starts_at  = strftime('%Y-%m-%dT%H:%M:%SZ', starts_at, ?),
+              ends_at    = strftime('%Y-%m-%dT%H:%M:%SZ', ends_at,   ?),
               is_active  = 1,
               updated_at = datetime('now')
         WHERE id IN (
@@ -162,10 +185,8 @@ export async function shiftLectureWeek(
              AND DATE(s.starts_at, '+9 hours') >= ?
         )`,
     )
-    .bind(lineAccountId, slot.eventId, slot.eventDate)
+    .bind(`${days} days`, `${days} days`, lineAccountId, slot.eventId, slot.eventDate)
     .run();
-
-  const newDate = addDays(slot.eventDate, 7);
 
   // 申込者も新しい日付へ。source_row を外して、以降の案内はこちらが持つ
   // (スプレッドシート側は古い日付のままなので、Apps Script は送らない)。

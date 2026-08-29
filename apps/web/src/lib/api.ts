@@ -2243,9 +2243,10 @@ export const wahmsApi = {
   resumeLecture: (accountId: string, slotId: string) =>
     fetchApi<ApiResponse<{ lecture: string; remindersRearmed: number }>>(
       `/api/wahms/lectures/${slotId}/resume?accountId=${encodeURIComponent(accountId)}`, { method: 'POST' }),
-  shiftLectureWeek: (accountId: string, slotId: string) =>
-    fetchApi<ApiResponse<{ lecture: string; newDate: string; shiftedSlots: number; movedApplications: number }>>(
-      `/api/wahms/lectures/${slotId}/shift-week?accountId=${encodeURIComponent(accountId)}`, { method: 'POST' }),
+  // direction='back' で1週間ぶん戻せる。押し間違いを取り消すため。
+  shiftLectureWeek: (accountId: string, slotId: string, direction: 'forward' | 'back' = 'forward') =>
+    fetchApi<ApiResponse<{ lecture: string; newDate: string; shiftedSlots: number; movedApplications: number; direction: string }>>(
+      `/api/wahms/lectures/${slotId}/shift-week?accountId=${encodeURIComponent(accountId)}&direction=${direction}`, { method: 'POST' }),
   // testRecipientId を渡さない＝申込者全員へ。Worker側が confirmBroadcast を
   // 必須にしているので、全員へ送るときだけ明示する。
   notifyPostponed: (accountId: string, slotId: string, testRecipientId?: string) =>
